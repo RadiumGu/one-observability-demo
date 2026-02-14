@@ -1,0 +1,10 @@
+# ConfigMap - 存储配置信息
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: petadoptions-config
+  namespace: petadoptions
+data:
+  rds_endpoint: "REPLACE_WITH_RDS_ENDPOINT"
+  internal_alb_dns: "REPLACE_WITH_INTERNAL_ALB_DNS"
+  aws_region: "REPLACE_WITH_AWS_REGION"

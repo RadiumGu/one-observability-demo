@@ -1,0 +1,49 @@
+# Internal ALB Ingress - 后端微服务
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: internal-alb-ingress
+  namespace: petadoptions
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internal  # 内部 ALB
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health/status
+    alb.ingress.kubernetes.io/load-balancer-name: PetAdoptions-Internal-ALB
+    alb.ingress.kubernetes.io/group.name: petadoptions-internal
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      # List Adoptions API
+      - path: /api/adoptionlist
+        pathType: Prefix
+        backend:
+          service:
+            name: listadoptions-service
+            port:
+              number: 80
+      # Search API
+      - path: /api/search
+        pathType: Prefix
+        backend:
+          service:
+            name: petsearch-service
+            port:
+              number: 80
+      # PayFor Adoption API
+      - path: /api/payforadoption
+        pathType: Prefix
+        backend:
+          service:
+            name: payforadoption-service
+            port:
+              number: 80
+      - path: /api/home
+        pathType: Prefix
+        backend:
+          service:
+            name: payforadoption-service
+            port:
+              number: 80

@@ -1,0 +1,71 @@
+# PetSite Frontend - Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: petsite
+  namespace: petadoptions
+  labels:
+    app: petsite
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: petsite
+  template:
+    metadata:
+      labels:
+        app: petsite
+        version: v1
+    spec:
+      nodeSelector:
+        arch: arm64
+      containers:
+      - name: petsite
+        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/petsite:latest
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: AWS_REGION
+          value: "<AWS_REGION>"
+        - name: INTERNAL_ALB_DNS
+          valueFrom:
+            configMapKeyRef:
+              name: petadoptions-config
+              key: internal_alb_dns
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: petsite-service
+  namespace: petadoptions
+  labels:
+    app: petsite
+spec:
+  type: NodePort
+  selector:
+    app: petsite
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
