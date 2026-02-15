@@ -94,12 +94,24 @@ export class ServicesEks2 extends Stack {
     });
 
     // 使用现有 VPC (graph-dp-vpc-exploration) 而不是创建新 VPC
-    // VPC ID: vpc-0a13885dc3469b786, CIDR: 10.16.0.0/16
-    const theVPC = ec2.Vpc.fromVpcAttributes(this, 'ExistingVPC', {
-      vpcId: 'vpc-0a13885dc3469b786',
-      availabilityZones: ['ap-northeast-1a', 'ap-northeast-1c'],
-      publicSubnetIds: ['subnet-0e7943e31c1db45e0', 'subnet-09550fb89ba4a7e20'],
-      privateSubnetIds: ['subnet-0bfda19aa166144ac', 'subnet-09a0dfc61ad1e8b59'],
+    // VPC will be created by CDK with CIDR: 10.20.0.0/16
+    // Create new VPC for EKS cluster
+    const theVPC = new ec2.Vpc(this, 'PetSiteVPC', {
+      ipAddresses: ec2.IpAddresses.cidr('10.20.0.0/16'),
+      maxAzs: 2,
+      natGateways: 1,
+      subnetConfiguration: [
+        {
+          name: 'Public',
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
+        {
+          name: 'Private',
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          cidrMask: 24,
+        },
+      ],
     });
 
     // Create RDS Aurora PG cluster
@@ -107,8 +119,8 @@ export class ServicesEks2 extends Stack {
       vpc: theVPC,
     });
 
-    // 使用现有 VPC CIDR: 10.16.0.0/16
-    rdssecuritygroup.addIngressRule(ec2.Peer.ipv4('10.16.0.0/16'), ec2.Port.tcp(5432), 'Allow Aurora PG access from within the VPC CIDR range');
+    // 使用新 VPC CIDR: 10.20.0.0/16
+    rdssecuritygroup.addIngressRule(ec2.Peer.ipv4('10.20.0.0/16'), ec2.Port.tcp(5432), 'Allow Aurora PG access from within the VPC CIDR range');
 
     var rdsUsername = this.node.tryGetContext('rdsusername');
     if (rdsUsername == undefined) {
@@ -238,7 +250,7 @@ export class ServicesEks2 extends Stack {
 
     const clusterSG = ec2.SecurityGroup.fromSecurityGroupId(this, 'ClusterSG', cluster.clusterSecurityGroupId);
     clusterSG.addIngressRule(albSG, ec2.Port.allTraffic(), 'Allow traffic from the ALB');
-    clusterSG.addIngressRule(ec2.Peer.ipv4('10.16.0.0/16'), ec2.Port.tcp(443), 'Allow local access to k8s api');
+    clusterSG.addIngressRule(ec2.Peer.ipv4('10.20.0.0/16'), ec2.Port.tcp(443), 'Allow local access to k8s api');
 
     // Add SSM Permissions to the node role
     nodegroup.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
