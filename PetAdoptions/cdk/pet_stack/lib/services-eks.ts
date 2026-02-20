@@ -17,6 +17,7 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as applicationinsights from 'aws-cdk-lib/aws-applicationinsights';
 import * as resourcegroups from 'aws-cdk-lib/aws-resourcegroups';
+import * as cr from 'aws-cdk-lib/custom-resources';
 
 import { Construct } from 'constructs';
 import { PayForAdoptionServiceEks } from './services/pay-for-adoption-service-eks';
@@ -30,7 +31,7 @@ import { CfnJson, RemovalPolicy, Fn, Duration, Stack, StackProps, CfnOutput } fr
 import { readFileSync } from 'fs';
 import 'ts-replace-all';
 import { TreatMissingData, ComparisonOperator } from 'aws-cdk-lib/aws-cloudwatch';
-import { KubectlV31Layer } from '@aws-cdk/lambda-layer-kubectl-v31';
+import { KubectlV34Layer } from '@aws-cdk/lambda-layer-kubectl-v34';
 
 export class ServicesEks2 extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -38,9 +39,19 @@ export class ServicesEks2 extends Stack {
 
     const stackName = id;
 
+    const vpcCidr: string = this.node.tryGetContext('vpc_cidr') ?? '10.20.0.0/16';
+
     // Create SQS resource to send Pet adoption messages to
+    const dlq = new sqs.Queue(this, 'sqs_petadoption_dlq', {
+      retentionPeriod: Duration.days(14),
+    });
+
     const sqsQueue = new sqs.Queue(this, 'sqs_petadoption', {
       visibilityTimeout: Duration.seconds(300),
+      deadLetterQueue: {
+        queue: dlq,
+        maxReceiveCount: 3,
+      },
     });
 
     // Create SNS and an email topic to send notifications to
@@ -94,10 +105,9 @@ export class ServicesEks2 extends Stack {
     });
 
     // 使用现有 VPC (graph-dp-vpc-exploration) 而不是创建新 VPC
-    // VPC will be created by CDK with CIDR: 10.20.0.0/16
-    // Create new VPC for EKS cluster
+    // VPC CIDR is read from cdk.json context key 'vpc_cidr'
     const theVPC = new ec2.Vpc(this, 'PetSiteVPC', {
-      ipAddresses: ec2.IpAddresses.cidr('10.20.0.0/16'),
+      ipAddresses: ec2.IpAddresses.cidr(vpcCidr),
       maxAzs: 2,
       natGateways: 1,
       subnetConfiguration: [
@@ -114,13 +124,21 @@ export class ServicesEks2 extends Stack {
       ],
     });
 
+    // 禁用公有子网的自动分配公网 IP，避免安全警告
+    const publicSubnets = theVPC.selectSubnets({
+      subnetType: ec2.SubnetType.PUBLIC,
+    });
+    for (const subnet of publicSubnets.subnets) {
+      const cfnSubnet = subnet.node.defaultChild as ec2.CfnSubnet;
+      cfnSubnet.mapPublicIpOnLaunch = false;
+    }
+
     // Create RDS Aurora PG cluster
     const rdssecuritygroup = new ec2.SecurityGroup(this, 'petadoptionsrdsSG', {
       vpc: theVPC,
     });
 
-    // 使用新 VPC CIDR: 10.20.0.0/16
-    rdssecuritygroup.addIngressRule(ec2.Peer.ipv4('10.20.0.0/16'), ec2.Port.tcp(5432), 'Allow Aurora PG access from within the VPC CIDR range');
+    rdssecuritygroup.addIngressRule(ec2.Peer.ipv4(vpcCidr), ec2.Port.tcp(5432), 'Allow Aurora PG access from within the VPC CIDR range');
 
     var rdsUsername = this.node.tryGetContext('rdsusername');
     if (rdsUsername == undefined) {
@@ -165,17 +183,17 @@ export class ServicesEks2 extends Stack {
     // PetSite - Create ALB and Target Groups
     const albSG = new ec2.SecurityGroup(this, 'ALBSecurityGroup', {
       vpc: theVPC,
-      // Remove hard-coded name to let CDK generate unique name
-      // securityGroupName: 'ALBSecurityGroup',
       allowAllOutbound: true,
     });
-    albSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80));
+    albSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443));  // HTTPS
+    albSG.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80));   // HTTP (重定向)
 
     const alb = new elbv2.ApplicationLoadBalancer(this, 'PetSiteLoadBalancer', {
       vpc: theVPC,
       internetFacing: true,
       securityGroup: albSG,
     });
+    alb.node.addDependency(theVPC.internetConnectivityEstablished);
 
     const targetGroup = new elbv2.ApplicationTargetGroup(this, 'PetSiteTargetGroup', {
       port: 80,
@@ -189,10 +207,27 @@ export class ServicesEks2 extends Stack {
       parameterName: '/eks/petsite/TargetGroupArn',
     });
 
-    const listener = alb.addListener('Listener', {
+    // HTTPS Listener (443) - ACM certificate ARN from cdk.json context key 'acm_certificate_arn'
+    const acmCertificateArn = this.node.tryGetContext('acm_certificate_arn');
+    if (!acmCertificateArn) {
+      throw new Error("Required CDK context 'acm_certificate_arn' is not set. Pass it via cdk.json or --context acm_certificate_arn=<arn>");
+    }
+    const httpsListener = alb.addListener('HttpsListener', {
+      port: 443,
+      open: true,
+      certificates: [elbv2.ListenerCertificate.fromArn(acmCertificateArn)],
+      defaultTargetGroups: [targetGroup],
+    });
+
+    // HTTP Listener (80) - 重定向到 HTTPS
+    alb.addListener('HttpListener', {
       port: 80,
       open: true,
-      defaultTargetGroups: [targetGroup],
+      defaultAction: elbv2.ListenerAction.redirect({
+        protocol: 'HTTPS',
+        port: '443',
+        permanent: true,
+      }),
     });
 
     // PetAdoptionHistory - attach service to path /petadoptionhistory on PetSite ALB
@@ -206,7 +241,7 @@ export class ServicesEks2 extends Stack {
       },
     });
 
-    listener.addTargetGroups('PetAdoptionsHistoryTargetGroups', {
+    httpsListener.addTargetGroups('PetAdoptionsHistoryTargetGroups', {
       priority: 10,
       conditions: [elbv2.ListenerCondition.pathPatterns(['/petadoptionshistory/*'])],
       targetGroups: [petadoptionshistory_targetGroup],
@@ -228,29 +263,107 @@ export class ServicesEks2 extends Stack {
     });
 
     const secretsKey = new kms.Key(this, 'SecretsKey');
+    const clusterName: string = this.node.tryGetContext('cluster_name') ?? 'PetSite';
     const cluster = new eks.Cluster(this, 'petsite', {
-      clusterName: 'PetSite',
+      clusterName: clusterName,
       mastersRole: clusterAdmin,
       vpc: theVPC,
       defaultCapacity: 0,  // 禁用默认 NodeGroup，手动创建以指定 AMI 类型
       secretsEncryptionKey: secretsKey,
       version: eks.KubernetesVersion.V1_34,
-      kubectlLayer: new KubectlV31Layer(this, 'kubectl'),
+      kubectlLayer: new KubectlV34Layer(this, 'kubectl'),
       authenticationMode: eks.AuthenticationMode.API_AND_CONFIG_MAP,
     });
 
-    // 手动添加 NodeGroup，使用 Amazon Linux 2023 ARM64
+    // 创建清理 Lambda
+    const cleanupLambda = new lambda.Function(this, 'GuardDutyCleanupLambda', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
+      handler: 'index.handler',
+      timeout: Duration.minutes(5),
+      code: lambda.Code.fromInline(`
+import boto3
+import json
+
+def handler(event, context):
+    vpc_id = event['vpcId']
+    region = event['region']
+    ec2 = boto3.client('ec2', region_name=region)
+    
+    # 删除 GuardDuty VPC Endpoints
+    try:
+        endpoints = ec2.describe_vpc_endpoints(
+            Filters=[
+                {'Name': 'vpc-id', 'Values': [vpc_id]},
+                {'Name': 'tag:GuardDutyManaged', 'Values': ['true']}
+            ]
+        )
+        for ep in endpoints.get('VpcEndpoints', []):
+            ec2.delete_vpc_endpoints(VpcEndpointIds=[ep['VpcEndpointId']])
+            print(f"Deleted VPC Endpoint: {ep['VpcEndpointId']}")
+    except Exception as e:
+        print(f"Error deleting VPC endpoints: {e}")
+    
+    # 删除 GuardDuty Security Groups
+    try:
+        sgs = ec2.describe_security_groups(
+            Filters=[
+                {'Name': 'vpc-id', 'Values': [vpc_id]},
+                {'Name': 'group-name', 'Values': ['GuardDutyManagedSecurityGroup-*']}
+            ]
+        )
+        for sg in sgs.get('SecurityGroups', []):
+            if sg['GroupName'].startswith('GuardDutyManagedSecurityGroup-'):
+                ec2.delete_security_group(GroupId=sg['GroupId'])
+                print(f"Deleted Security Group: {sg['GroupId']}")
+    except Exception as e:
+        print(f"Error deleting security groups: {e}")
+    
+    return {'statusCode': 200, 'body': json.dumps('Cleanup completed')}
+`),
+    });
+
+    cleanupLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeVpcEndpoints', 'ec2:DeleteVpcEndpoints', 'ec2:DescribeSecurityGroups', 'ec2:DeleteSecurityGroup'],
+      resources: ['*'],
+    }));
+
+    // 清理 GuardDuty 资源（在 VPC 删除前）
+    const cleanupGuardDuty = new cr.AwsCustomResource(this, 'CleanupGuardDuty', {
+      onDelete: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: cleanupLambda.functionName,
+          InvocationType: 'RequestResponse',
+          Payload: JSON.stringify({
+            vpcId: theVPC.vpcId,
+            region: Stack.of(this).region
+          })
+        },
+        physicalResourceId: cr.PhysicalResourceId.of('cleanup-guardduty'),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [cleanupLambda.functionArn],
+        })
+      ]),
+    });
+
+    // 手动添加 NodeGroup，使用 ARM64 实例，部署在私有子网避免公网 IP
     const nodegroup = cluster.addNodegroupCapacity('workers', {
-      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T3, ec2.InstanceSize.LARGE)],
-      minSize: 2,
-      maxSize: 4,
-      desiredSize: 2,
-      amiType: eks.NodegroupAmiType.AL2023_X86_64_STANDARD,
+      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.XLARGE)],
+      minSize: 3,
+      maxSize: 6,
+      desiredSize: 3,
+      amiType: eks.NodegroupAmiType.AL2023_ARM_64_STANDARD,
+      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },  // 强制使用私有子网
     });
 
     const clusterSG = ec2.SecurityGroup.fromSecurityGroupId(this, 'ClusterSG', cluster.clusterSecurityGroupId);
     clusterSG.addIngressRule(albSG, ec2.Port.allTraffic(), 'Allow traffic from the ALB');
-    clusterSG.addIngressRule(ec2.Peer.ipv4('10.20.0.0/16'), ec2.Port.tcp(443), 'Allow local access to k8s api');
+    clusterSG.addIngressRule(ec2.Peer.ipv4(vpcCidr), ec2.Port.tcp(443), 'Allow local access to k8s api');
 
     // Add SSM Permissions to the node role
     nodegroup.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
@@ -388,23 +501,38 @@ export class ServicesEks2 extends Stack {
       chart: 'aws-load-balancer-controller',
       repository: 'https://aws.github.io/eks-charts',
       namespace: 'kube-system',
+      wait: true,  // 等待 Helm Chart 完全就绪，确保 Webhook 可用
+      timeout: Duration.minutes(15),  // 最大允许 15 分钟
       values: {
-        clusterName: 'PetSite',
+        clusterName: cluster.clusterName,
+        fullnameOverride: 'aws-load-balancer-controller',
         serviceAccount: {
           create: false,
           name: 'alb-ingress-controller',
         },
-        wait: true,
+        replicaCount: 2,
+        vpcId: cluster.vpc.vpcId,
+        region: this.region,
       },
     });
     awsLoadBalancerManifest.node.addDependency(loadBalancerCRDManifest);
     awsLoadBalancerManifest.node.addDependency(loadBalancerServiceAccount);
     awsLoadBalancerManifest.node.addDependency(waitForLBServiceAccount);
 
+    // Wait for LB Controller deployment to have available replicas before creating LoadBalancer services
+    const waitForLBControllerReady = new eks.KubernetesObjectValue(this, 'WaitForLBControllerReady', {
+      cluster: cluster,
+      objectName: 'aws-load-balancer-controller',
+      objectType: 'deployment',
+      objectNamespace: 'kube-system',
+      jsonPath: '.status.availableReplicas',
+    });
+    waitForLBControllerReady.node.addDependency(awsLoadBalancerManifest);
+
     // NOTE: Amazon CloudWatch Observability Addon for CloudWatch Agent and Fluentbit
     const otelAddon = new eks.CfnAddon(this, 'otelObservabilityAddon', {
       addonName: 'amazon-cloudwatch-observability',
-      addonVersion: 'v4.4.0-eksbuild.1',
+      addonVersion: 'v4.10.0-eksbuild.1',
       clusterName: cluster.clusterName,
       resolveConflicts: 'OVERWRITE',
       preserveOnDelete: false,
@@ -431,7 +559,7 @@ export class ServicesEks2 extends Stack {
     // Amazon EKS Pod Identity Agent Addon for Network Flow Monitor
     const podIdentityAgentAddon = new eks.CfnAddon(this, 'PodIdentityAgentAddon', {
       addonName: 'eks-pod-identity-agent',
-      addonVersion: 'v1.3.4-eksbuild.1',
+      addonVersion: 'v1.3.10-eksbuild.2',
       clusterName: cluster.clusterName,
       resolveConflicts: 'OVERWRITE',
       preserveOnDelete: false,
@@ -440,7 +568,7 @@ export class ServicesEks2 extends Stack {
     // Amazon EKS AWS Network Flow Monitor Agent add-on
     const networkFlowMonitoringAgentAddon = new eks.CfnAddon(this, 'NetworkFlowMonitoringAgentAddon', {
       addonName: 'aws-network-flow-monitoring-agent',
-      addonVersion: 'v1.0.1-eksbuild.2',
+      addonVersion: 'v1.1.3-eksbuild.1',
       clusterName: cluster.clusterName,
       resolveConflicts: 'OVERWRITE',
       preserveOnDelete: false,
@@ -466,10 +594,11 @@ export class ServicesEks2 extends Stack {
       instrumentation: 'otel',
       region: region,
       database: auroraCluster,
-      serviceType: 'LoadBalancer',
+      serviceType: 'ClusterIP',
     });
     payForAdoptionService.addToPrincipalPolicy(readSSMParamsPolicy);
     payForAdoptionService.addToPrincipalPolicy(ddbSeedPolicy);
+    payForAdoptionService.node.addDependency(waitForLBControllerReady);
 
     // ListAdoptions service - EKS deployment
     const listAdoptionsService = new ListAdoptionsServiceEks(this, 'list-adoptions', {
@@ -481,9 +610,10 @@ export class ServicesEks2 extends Stack {
       instrumentation: 'otel',
       region: region,
       database: auroraCluster,
-      serviceType: 'LoadBalancer',
+      serviceType: 'ClusterIP',
     });
     listAdoptionsService.addToPrincipalPolicy(readSSMParamsPolicy);
+    listAdoptionsService.node.addDependency(waitForLBControllerReady);
 
     // Search service - EKS deployment
     const searchService = new SearchServiceEks(this, 'search-service', {
@@ -494,9 +624,10 @@ export class ServicesEks2 extends Stack {
       healthCheck: '/health/status',
       instrumentation: 'otel',
       region: region,
-      serviceType: 'LoadBalancer',
+      serviceType: 'ClusterIP',
     });
     searchService.addToPrincipalPolicy(readSSMParamsPolicy);
+    searchService.node.addDependency(waitForLBControllerReady);
 
     // Traffic Generator service - EKS deployment
     const trafficGeneratorService = new TrafficGeneratorServiceEks(this, 'traffic-generator', {
@@ -509,7 +640,7 @@ export class ServicesEks2 extends Stack {
       serviceType: 'ClusterIP',
     });
     trafficGeneratorService.addToPrincipalPolicy(readSSMParamsPolicy);
-    trafficGeneratorService.node.addDependency(alb);
+    trafficGeneratorService.node.addDependency(waitForLBControllerReady);
 
     // PetStatusUpdater Lambda Function and APIGW
     const statusUpdaterService = new StatusUpdaterService(this, 'status-updater-service', {
@@ -541,7 +672,8 @@ export class ServicesEks2 extends Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '/../resources/resource-controller-widget')),
       handler: 'petsite-application-resource-controler.lambda_handler',
       memorySize: 128,
-      runtime: lambda.Runtime.PYTHON_3_9,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
       role: customWidgetLambdaRole,
       timeout: Duration.minutes(10),
     });
@@ -553,7 +685,8 @@ export class ServicesEks2 extends Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '/../resources/resource-controller-widget')),
       handler: 'cloudwatch-custom-widget.lambda_handler',
       memorySize: 128,
-      runtime: lambda.Runtime.PYTHON_3_9,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
       role: customWidgetLambdaRole,
       timeout: Duration.seconds(60),
     });
@@ -601,7 +734,8 @@ export class ServicesEks2 extends Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '/../resources/application-insights')),
       handler: 'dynamodb-query-function.lambda_handler',
       memorySize: 128,
-      runtime: lambda.Runtime.PYTHON_3_9,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.ARM_64,
       role: dynamodbQueryLambdaRole,
       timeout: Duration.seconds(900),
     });
@@ -650,8 +784,9 @@ export class ServicesEks2 extends Stack {
           '/petstore/rdsendpoint': auroraCluster.clusterEndpoint.hostname,
           '/petstore/rds-reader-endpoint': auroraCluster.clusterReadEndpoint.hostname,
           '/petstore/stackname': stackName,
-          '/petstore/petsiteurl': `http://${alb.loadBalancerDnsName}`,
-          '/petstore/pethistoryurl': `http://${alb.loadBalancerDnsName}/petadoptionshistory`,
+          // Use internal k8s service DNS to bypass ALB Cognito auth for traffic generator
+          '/petstore/petsiteurl': 'http://service-petsite.default.svc.cluster.local',
+          '/petstore/pethistoryurl': 'http://service-petsite.default.svc.cluster.local/petadoptionshistory',
           '/eks/petsite/OIDCProviderUrl': cluster.clusterOpenIdConnectIssuerUrl,
           '/eks/petsite/OIDCProviderArn': cluster.openIdConnectProvider.openIdConnectProviderArn,
           '/petstore/errormode1': 'false',
