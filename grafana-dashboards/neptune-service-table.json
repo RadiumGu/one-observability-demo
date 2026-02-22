@@ -1,0 +1,180 @@
+{
+  "panels": [
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "bfdww4i8nxreoc"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "bfdww4i8nxreoc"
+          },
+          "queryType": "sql",
+          "rawQuery": true,
+          "rawSql": "SELECT count() AS total_calls\nFROM flow_log.l7_flow_log\nWHERE toUnixTimestamp64Milli(start_time) BETWEEN $__from AND $__to\n  AND l7_protocol != 120\n  AND (request_resource IS NULL OR request_resource NOT IN ('/metrics', '/'))",
+          "refId": "A"
+        }
+      ],
+      "title": "Total L7 Calls",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "bfdww4i8nxreoc"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "bfdww4i8nxreoc"
+          },
+          "queryType": "sql",
+          "rawQuery": true,
+          "rawSql": "SELECT uniqExact(auto_service_id_0) AS active_services\nFROM flow_log.l7_flow_log\nWHERE toUnixTimestamp64Milli(start_time) BETWEEN $__from AND $__to\n  AND auto_service_id_0 > 0\n  AND l7_protocol != 120",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Services",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "bfdww4i8nxreoc"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "error_pct"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "avg_latency_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "calls"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 22,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 3,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "bfdww4i8nxreoc"
+          },
+          "queryType": "sql",
+          "rawQuery": true,
+          "rawSql": "SELECT\n    dictGetOrDefault('flow_tag.pod_service_map', 'name', toUInt64(auto_service_id_0), toString(auto_service_id_0)) AS source_service,\n    dictGetOrDefault('flow_tag.pod_service_map', 'name', toUInt64(auto_service_id_1), toString(auto_service_id_1)) AS dest_service,\n    toString(l7_protocol) AS protocol,\n    count() AS calls,\n    round(avg(response_duration) / 1000, 2) AS avg_latency_ms,\n    round(countIf(response_status >= 2) / count() * 100, 2) AS error_pct\nFROM flow_log.l7_flow_log\nWHERE toUnixTimestamp64Milli(start_time) BETWEEN $__from AND $__to\n  AND auto_service_id_0 > 0\n  AND auto_service_id_1 > 0\n  AND l7_protocol != 120\n  AND (request_resource IS NULL OR request_resource NOT IN ('/metrics', '/'))\nGROUP BY source_service, dest_service, protocol\nORDER BY calls DESC\nLIMIT 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Service L7 Call Statistics",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "tags": [
+    "petsite",
+    "deepflow",
+    "clickhouse"
+  ],
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "title": "PetSite Service Calls Table",
+  "uid": "neptune-service-table",
+  "version": 11
+}

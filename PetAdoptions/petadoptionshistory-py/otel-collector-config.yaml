@@ -31,10 +31,10 @@ data:
               relabel_configs:
                 - source_labels: [__meta_kubernetes_pod_container_port_number]
                   action: keep
-                  target_label: '^8080$'
+                  regex: '^8080$'
                 - source_labels: [ __meta_kubernetes_pod_container_name ]
                   action: keep
-                  target_label: '^pethistory$'
+                  regex: '^pethistory$'
                 - source_labels: [ __meta_kubernetes_pod_name ]
                   action: replace
                   target_label: pod_name
@@ -47,8 +47,8 @@ data:
         timeout: 60s
 
     exporters:
-      logging:
-        loglevel: debug
+      debug:
+        verbosity: detailed
       awsxray:
       awsemf:
         namespace: "PetAdoptionsHistory"

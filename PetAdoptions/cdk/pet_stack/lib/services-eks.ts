@@ -786,7 +786,7 @@ def handler(event, context):
           '/petstore/stackname': stackName,
           // Use internal k8s service DNS to bypass ALB Cognito auth for traffic generator
           '/petstore/petsiteurl': 'http://service-petsite.default.svc.cluster.local',
-          '/petstore/pethistoryurl': 'http://service-petsite.default.svc.cluster.local/petadoptionshistory',
+          '/petstore/pethistoryurl': 'http://pethistory-service.default.svc.cluster.local:8080/petadoptionshistory',
           '/eks/petsite/OIDCProviderUrl': cluster.clusterOpenIdConnectIssuerUrl,
           '/eks/petsite/OIDCProviderArn': cluster.openIdConnectProvider.openIdConnectProviderArn,
           '/petstore/errormode1': 'false',
