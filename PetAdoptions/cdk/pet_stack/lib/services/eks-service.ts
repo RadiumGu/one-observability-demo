@@ -172,12 +172,15 @@ export abstract class EksService extends Construct {
             spec: {
               serviceAccountName: this.serviceAccount.serviceAccountName,
               // 多副本时强制跨 AZ + 跨 Node 打散，确保 AZ 故障只影响一半副本
+              // Safe to use DoNotSchedule because:
+              // 1. 4 nodes across 2 AZs (2+2) provide enough CPU headroom
+              // 2. maxSurge:0 rolling strategy never requires extra pods simultaneously
               ...(props.replicas >= 2 && {
                 topologySpreadConstraints: [
                   {
                     maxSkew: 1,
                     topologyKey: 'topology.kubernetes.io/zone',
-                    whenUnsatisfiable: 'ScheduleAnyway', // avoid rolling update deadlock in 2-AZ clusters
+                    whenUnsatisfiable: 'DoNotSchedule',
                     labelSelector: { matchLabels: { app: serviceName } },
                   },
                   {
@@ -196,7 +199,11 @@ export abstract class EksService extends Construct {
     });
 
     // Create Service manifest
-    const serviceAnnotations: { [key: string]: string } = {};
+    const serviceAnnotations: { [key: string]: string } = {
+      // Topology Aware Routing: kube-proxy prefers in-zone endpoints to reduce cross-AZ traffic.
+      // Falls back to cross-AZ automatically when no healthy in-zone pod exists.
+      'service.kubernetes.io/topology-mode': 'auto',
+    };
     if (props.serviceType === 'LoadBalancer') {
       serviceAnnotations['service.beta.kubernetes.io/aws-load-balancer-type'] = 'nlb';
       serviceAnnotations['service.beta.kubernetes.io/aws-load-balancer-scheme'] = 'internal';
