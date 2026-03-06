@@ -96,10 +96,35 @@ export abstract class EksService extends Construct {
 
     // Add sidecar containers based on instrumentation
     if (props.instrumentation === 'otel') {
+      // Use AOT_CONFIG_CONTENT env var to pass config inline - no ConfigMap needed
       containers.push({
         name: 'aws-otel-collector',
         image: 'public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1',
-        command: ['--config', '/etc/ecs/ecs-xray.yaml'],
+        env: [{
+          name: 'AOT_CONFIG_CONTENT',
+          value: [
+            'receivers:',
+            '  otlp:',
+            '    protocols:',
+            '      grpc:',
+            '        endpoint: 0.0.0.0:4317',
+            '      http:',
+            '        endpoint: 0.0.0.0:4318',
+            'processors:',
+            '  batch/traces:',
+            '    timeout: 1s',
+            '    send_batch_size: 50',
+            'exporters:',
+            '  awsxray:',
+            '    region: ' + props.region,
+            'service:',
+            '  pipelines:',
+            '    traces:',
+            '      receivers: [otlp]',
+            '      processors: [batch/traces]',
+            '      exporters: [awsxray]',
+          ].join('\n'),
+        }],
         resources: {
           requests: { cpu: '256m', memory: '256Mi' },
           limits: { cpu: '256m', memory: '256Mi' },
@@ -139,6 +164,23 @@ export abstract class EksService extends Construct {
             },
             spec: {
               serviceAccountName: this.serviceAccount.serviceAccountName,
+              // 多副本时强制跨 AZ + 跨 Node 打散，确保 AZ 故障只影响一半副本
+              ...(props.replicas >= 2 && {
+                topologySpreadConstraints: [
+                  {
+                    maxSkew: 1,
+                    topologyKey: 'topology.kubernetes.io/zone',
+                    whenUnsatisfiable: 'ScheduleAnyway', // avoid rolling update deadlock in 2-AZ clusters
+                    labelSelector: { matchLabels: { app: serviceName } },
+                  },
+                  {
+                    maxSkew: 1,
+                    topologyKey: 'kubernetes.io/hostname',
+                    whenUnsatisfiable: 'DoNotSchedule',
+                    labelSelector: { matchLabels: { app: serviceName } },
+                  },
+                ],
+              }),
               containers: containers,
             },
           },
