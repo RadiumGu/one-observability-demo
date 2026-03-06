@@ -158,6 +158,13 @@ export abstract class EksService extends Construct {
           selector: {
             matchLabels: { app: serviceName },
           },
+          // maxSurge:0 + maxUnavailable:1 prevents rolling update CPU deadlock on 2-node clusters:
+          // instead of adding a new pod before removing old (which requires extra CPU headroom),
+          // it removes 1 old pod first, then adds 1 new pod, keeping total pods constant.
+          strategy: {
+            type: 'RollingUpdate',
+            rollingUpdate: { maxSurge: 0, maxUnavailable: 1 },
+          },
           template: {
             metadata: {
               labels: { app: serviceName },
