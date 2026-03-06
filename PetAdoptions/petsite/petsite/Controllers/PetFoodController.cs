@@ -17,9 +17,8 @@ namespace PetSite.Controllers
         private IConfiguration _configuration;
         
         public PetFoodController(IConfiguration configuration)
-        
         {
-            AWSSDKHandler.RegisterXRayForAllServices();
+            _configuration = configuration;
         }
 
         [HttpGet("/petfood")]
@@ -27,7 +26,11 @@ namespace PetSite.Controllers
         {
             // X-Ray FTW
             AWSXRayRecorder.Instance.BeginSubsegment("Calling PetFood");
-            Console.WriteLine($"[{AWSXRayRecorder.Instance.GetEntity().TraceId}][{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}] - Calling PetFood");
+            try
+            {
+                Console.WriteLine($"[{AWSXRayRecorder.Instance.GetEntity().TraceId}][{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}] - Calling PetFood");
+            }
+            catch (Amazon.XRay.Recorder.Core.Exceptions.EntityNotAvailableException) { /* trace context not available, safe to skip */ }
             
             // Get our data from petfood
             var httpClient = new HttpClient(new HttpClientXRayTracingHandler(new HttpClientHandler()));
@@ -46,7 +49,11 @@ namespace PetSite.Controllers
             // X-Ray FTW
             AWSXRayRecorder.Instance.BeginSubsegment("Calling PetFood metric");
             Console.WriteLine("Calling: " + "http://petfood-metric/metric/" + entityId + "/" + value.ToString());
-            Console.WriteLine($"[{AWSXRayRecorder.Instance.GetEntity().TraceId}][{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}] - Calling PetFood metric");            
+            try
+            {
+                Console.WriteLine($"[{AWSXRayRecorder.Instance.GetEntity().TraceId}][{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}] - Calling PetFood metric");
+            }
+            catch (Amazon.XRay.Recorder.Core.Exceptions.EntityNotAvailableException) { /* trace context not available, safe to skip */ }
             
             var httpClient = new HttpClient(new HttpClientXRayTracingHandler(new HttpClientHandler()));
             string result = await httpClient.GetStringAsync("http://petfood-metric/metric/" + entityId + "/" + value.ToString());

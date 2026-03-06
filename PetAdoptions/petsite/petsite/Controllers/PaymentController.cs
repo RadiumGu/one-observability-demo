@@ -42,10 +42,11 @@ namespace PetSite.Controllers
 
         public PaymentController(IConfiguration configuration)
         {
-            AWSSDKHandler.RegisterXRayForAllServices();
             _configuration = configuration;
 
-            _sqsClient = new AmazonSQSClient(Amazon.Util.EC2InstanceMetadata.Region);
+            var region = RegionEndpoint.GetBySystemName(
+                Environment.GetEnvironmentVariable("AWS_REGION") ?? "ap-northeast-1");
+            _sqsClient = new AmazonSQSClient(region);
         }
 
         // GET: Payment
@@ -60,17 +61,22 @@ namespace PetSite.Controllers
         // [ValidateAntiForgeryToken]
         public async Task<IActionResult> MakePayment(string petId, string pettype)
         {
-            AWSXRayRecorder.Instance.AddMetadata("PetType", pettype);
-            AWSXRayRecorder.Instance.AddMetadata("PetId", petId);
-
             ViewData["txStatus"] = "success";
 
             try
             {
                 AWSXRayRecorder.Instance.BeginSubsegment("Call Payment API");
 
-                Console.WriteLine(
-                    $"[{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}][{AWSXRayRecorder.Instance.GetEntity().TraceId}] - Inside MakePayment Action method - PetId:{petId} - PetType:{pettype}");
+                // Fix: AddMetadata after BeginSubsegment; GetEntity wrapped with try-catch
+                AWSXRayRecorder.Instance.AddMetadata("PetType", pettype);
+                AWSXRayRecorder.Instance.AddMetadata("PetId", petId);
+
+                try
+                {
+                    Console.WriteLine(
+                        $"[{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}][{AWSXRayRecorder.Instance.GetEntity().TraceId}] - Inside MakePayment Action method - PetId:{petId} - PetType:{pettype}");
+                }
+                catch (Amazon.XRay.Recorder.Core.Exceptions.EntityNotAvailableException) { /* trace context not available, safe to skip */ }
 
                 AWSXRayRecorder.Instance.AddAnnotation("PetId", petId);
                 AWSXRayRecorder.Instance.AddAnnotation("PetType", pettype);

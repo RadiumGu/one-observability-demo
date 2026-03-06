@@ -9,6 +9,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Prometheus;
+using Amazon.SimpleSystemsManagement;
+using Amazon.XRay.Recorder.Handlers.AwsSdk;
 
 namespace PetSite
 {
@@ -27,6 +29,11 @@ namespace PetSite
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
+            // Register X-Ray for all AWS SDK calls once at startup (not in individual controllers)
+            AWSSDKHandler.RegisterXRayForAllServices();
+
+            services.AddDataProtection()
+                .PersistKeysToAWSSystemsManager("/petstore/dataprotection");
             services.AddControllersWithViews();
         }
 
