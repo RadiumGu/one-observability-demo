@@ -354,9 +354,9 @@ def handler(event, context):
     // 手动添加 NodeGroup，使用 ARM64 实例，部署在私有子网避免公网 IP
     const nodegroup = cluster.addNodegroupCapacity('workers', {
       instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.XLARGE)],
-      minSize: 4,
+      minSize: 3,
       maxSize: 6,
-      desiredSize: 4,
+      desiredSize: 3,
       amiType: eks.NodegroupAmiType.AL2023_ARM_64_STANDARD,
       subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },  // 强制使用私有子网
     });
