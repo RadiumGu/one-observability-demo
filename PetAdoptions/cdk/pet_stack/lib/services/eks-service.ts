@@ -126,7 +126,7 @@ export abstract class EksService extends Construct {
           ].join('\n'),
         }],
         resources: {
-          requests: { cpu: '256m', memory: '256Mi' },
+          requests: { cpu: '128m', memory: '256Mi' },
           limits: { cpu: '256m', memory: '256Mi' },
         },
       });
@@ -136,7 +136,7 @@ export abstract class EksService extends Construct {
         image: 'public.ecr.aws/xray/aws-xray-daemon:3.3.4',
         ports: [{ containerPort: 2000, protocol: 'UDP' }],
         resources: {
-          requests: { cpu: '256m', memory: '256Mi' },
+          requests: { cpu: '128m', memory: '256Mi' },
           limits: { cpu: '256m', memory: '256Mi' },
         },
       });
