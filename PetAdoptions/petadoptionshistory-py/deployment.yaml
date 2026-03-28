@@ -46,13 +46,13 @@ spec:
             app: pethistory
         maxSkew: 1
         topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: DoNotSchedule
+        whenUnsatisfiable: ScheduleAnyway
       - labelSelector:
           matchLabels:
             app: pethistory
         maxSkew: 1
         topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
+        whenUnsatisfiable: ScheduleAnyway
       containers:
       - image: "{{ECR_IMAGE_URL}}"
         imagePullPolicy: Always

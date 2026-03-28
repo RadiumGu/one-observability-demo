@@ -33,7 +33,7 @@ export abstract class EksService extends Construct {
     const serviceName = id.toLowerCase();
     this.serviceName = serviceName;
     const port = props.port || 80;
-    const namespace = 'default';
+    const namespace = 'petadoptions';
 
     // Create Service Account with IRSA
     this.serviceAccount = new eks.ServiceAccount(this, 'ServiceAccount', {
@@ -126,7 +126,7 @@ export abstract class EksService extends Construct {
           ].join('\n'),
         }],
         resources: {
-          requests: { cpu: '128m', memory: '256Mi' },
+          requests: { cpu: '32m', memory: '256Mi' },
           limits: { cpu: '256m', memory: '256Mi' },
         },
       });
@@ -136,7 +136,7 @@ export abstract class EksService extends Construct {
         image: 'public.ecr.aws/xray/aws-xray-daemon:3.3.4',
         ports: [{ containerPort: 2000, protocol: 'UDP' }],
         resources: {
-          requests: { cpu: '128m', memory: '256Mi' },
+          requests: { cpu: '32m', memory: '256Mi' },
           limits: { cpu: '256m', memory: '256Mi' },
         },
       });
@@ -171,22 +171,20 @@ export abstract class EksService extends Construct {
             },
             spec: {
               serviceAccountName: this.serviceAccount.serviceAccountName,
-              // 多副本时强制跨 AZ + 跨 Node 打散，确保 AZ 故障只影响一半副本
-              // Safe to use DoNotSchedule because:
-              // 1. 4 nodes across 2 AZs (2+2) provide enough CPU headroom
-              // 2. maxSurge:0 rolling strategy never requires extra pods simultaneously
+              // 多副本时优先跨 AZ + 跨 Node 打散，允许同 AZ 双 replica（t4g.large CPU 紧张时兼容）
+              // ScheduleAnyway: scheduler 尽力均衡但不会阻止调度
               ...(props.replicas >= 2 && {
                 topologySpreadConstraints: [
                   {
                     maxSkew: 1,
                     topologyKey: 'topology.kubernetes.io/zone',
-                    whenUnsatisfiable: 'DoNotSchedule',
+                    whenUnsatisfiable: 'ScheduleAnyway',
                     labelSelector: { matchLabels: { app: serviceName } },
                   },
                   {
                     maxSkew: 1,
                     topologyKey: 'kubernetes.io/hostname',
-                    whenUnsatisfiable: 'DoNotSchedule',
+                    whenUnsatisfiable: 'ScheduleAnyway',
                     labelSelector: { matchLabels: { app: serviceName } },
                   },
                 ],
