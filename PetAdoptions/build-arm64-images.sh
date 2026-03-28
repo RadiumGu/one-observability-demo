@@ -81,11 +81,25 @@ build_and_push "listadoptions" "petlistadoptions-go"
 echo -e "${YELLOW}[4/6] 构建 Search 服务 (Java)...${NC}"
 build_and_push "petsearch" "petsearch-java"
 
-echo -e "${YELLOW}[5/6] 构建 PetHistory 服务 (Python)...${NC}"
-build_and_push "pethistory" "petadoptionshistory-py"
+echo -e "${YELLOW}[5/7] 构建 PetHistory 服务 (Python)...${NC}"
+# ECR repo 名称是 pet-adoptions-history（和 CDK 创建的一致）
+create_ecr_repo "pet-adoptions-history"
+cd ~/tech/one-observability-demo/PetAdoptions/petadoptionshistory-py
+docker buildx build \
+    --platform linux/arm64 \
+    -t $ECR_REGISTRY/pet-adoptions-history:$IMAGE_TAG \
+    -t $ECR_REGISTRY/pet-adoptions-history:arm64 \
+    -f Dockerfile \
+    --push \
+    .
+echo -e "${GREEN}✓ pet-adoptions-history 构建完成${NC}"
+echo ""
 
-echo -e "${YELLOW}[6/6] 构建 PetSite 前端 (Node.js)...${NC}"
+echo -e "${YELLOW}[6/7] 构建 PetSite 前端 (.NET)...${NC}"
 build_and_push "petsite" "petsite/petsite"
+
+echo -e "${YELLOW}[7/7] 构建 TrafficGenerator (.NET)...${NC}"
+build_and_push "trafficgenerator" "trafficgenerator"
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
@@ -96,10 +110,11 @@ echo "镜像列表:"
 echo "  - $ECR_REGISTRY/petadoptions/payforadoption:$IMAGE_TAG"
 echo "  - $ECR_REGISTRY/petadoptions/listadoptions:$IMAGE_TAG"
 echo "  - $ECR_REGISTRY/petadoptions/petsearch:$IMAGE_TAG"
-echo "  - $ECR_REGISTRY/petadoptions/pethistory:$IMAGE_TAG"
+echo "  - $ECR_REGISTRY/pet-adoptions-history:$IMAGE_TAG"
 echo "  - $ECR_REGISTRY/petadoptions/petsite:$IMAGE_TAG"
+echo "  - $ECR_REGISTRY/petadoptions/trafficgenerator:$IMAGE_TAG"
 echo ""
 echo "下一步："
-echo "  1. 部署 CDK Stack: cd cdk/pet_stack && cdk deploy Services-PetStack"
+echo "  1. 部署 CDK Stack: cd cdk/pet_stack && cdk deploy Services"
 echo "  2. 部署 K8s 资源: kubectl apply -f k8s-manifests/"
 echo ""

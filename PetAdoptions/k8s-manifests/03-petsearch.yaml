@@ -2,65 +2,114 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: petsearch
+  name: search-service
   namespace: petadoptions
   labels:
-    app: petsearch
+    app: search-service
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: petsearch
+      app: search-service
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
   template:
     metadata:
       labels:
-        app: petsearch
-        version: v1
+        app: search-service
     spec:
-      nodeSelector:
-        arch: arm64
+      serviceAccountName: search-service-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: search-service
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: search-service
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
       containers:
-      - name: petsearch
+      - name: search-service
         image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/petsearch:latest
         ports:
         - containerPort: 80
-          name: http
+          protocol: TCP
         env:
         - name: AWS_REGION
           value: "<AWS_REGION>"
+        - name: JAVA_TOOL_OPTIONS
+          value: "-javaagent:/app/aws-opentelemetry-agent.jar -XX:+PreserveFramePointer"
         livenessProbe:
           httpGet:
             path: /health/status
             port: 80
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /health/status
             port: 80
-          initialDelaySeconds: 30
+          initialDelaySeconds: 5
           periodSeconds: 5
         resources:
           requests:
+            cpu: "128m"
             memory: "512Mi"
-            cpu: "500m"
           limits:
+            cpu: "512m"
             memory: "1Gi"
-            cpu: "1000m"
+      - name: aws-otel-collector
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        env:
+        - name: AOT_CONFIG_CONTENT
+          value: |
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                    endpoint: 0.0.0.0:4317
+                  http:
+                    endpoint: 0.0.0.0:4318
+            processors:
+              batch/traces:
+                timeout: 1s
+                send_batch_size: 50
+            exporters:
+              awsxray:
+                region: <AWS_REGION>
+            service:
+              pipelines:
+                traces:
+                  receivers: [otlp]
+                  processors: [batch/traces]
+                  exporters: [awsxray]
+        resources:
+          requests:
+            cpu: "32m"
+            memory: "256Mi"
+          limits:
+            cpu: "256m"
+            memory: "256Mi"
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: petsearch-service
+  name: search-service
   namespace: petadoptions
   labels:
-    app: petsearch
+    app: search-service
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
-    app: petsearch
+    app: search-service
   ports:
   - port: 80
     targetPort: 80
     protocol: TCP
-    name: http

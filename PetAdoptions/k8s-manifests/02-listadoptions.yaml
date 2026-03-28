@@ -2,39 +2,48 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: listadoptions
+  name: list-adoptions
   namespace: petadoptions
   labels:
-    app: listadoptions
+    app: list-adoptions
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: listadoptions
+      app: list-adoptions
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
   template:
     metadata:
       labels:
-        app: listadoptions
-        version: v1
+        app: list-adoptions
     spec:
-      nodeSelector:
-        arch: arm64  # Graviton 节点
+      serviceAccountName: list-adoptions-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: list-adoptions
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: list-adoptions
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
       containers:
-      - name: listadoptions
+      - name: list-adoptions
         image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/listadoptions:latest
         ports:
         - containerPort: 80
-          name: http
+          protocol: TCP
         env:
         - name: AWS_REGION
           value: "<AWS_REGION>"
-        - name: RDS_ENDPOINT
-          valueFrom:
-            configMapKeyRef:
-              name: petadoptions-config
-              key: rds_endpoint
-        - name: DB_NAME
-          value: "adoptions"
         livenessProbe:
           httpGet:
             path: /health/status
@@ -45,30 +54,61 @@ spec:
           httpGet:
             path: /health/status
             port: 80
-          initialDelaySeconds: 10
+          initialDelaySeconds: 5
           periodSeconds: 5
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "250m"
-          limits:
+            cpu: "128m"
             memory: "512Mi"
-            cpu: "500m"
+          limits:
+            cpu: "512m"
+            memory: "1Gi"
+      - name: aws-otel-collector
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        env:
+        - name: AOT_CONFIG_CONTENT
+          value: |
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                    endpoint: 0.0.0.0:4317
+                  http:
+                    endpoint: 0.0.0.0:4318
+            processors:
+              batch/traces:
+                timeout: 1s
+                send_batch_size: 50
+            exporters:
+              awsxray:
+                region: <AWS_REGION>
+            service:
+              pipelines:
+                traces:
+                  receivers: [otlp]
+                  processors: [batch/traces]
+                  exporters: [awsxray]
+        resources:
+          requests:
+            cpu: "32m"
+            memory: "256Mi"
+          limits:
+            cpu: "256m"
+            memory: "256Mi"
 ---
 # ListAdoptions Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: listadoptions-service
+  name: list-adoptions
   namespace: petadoptions
   labels:
-    app: listadoptions
+    app: list-adoptions
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
-    app: listadoptions
+    app: list-adoptions
   ports:
   - port: 80
     targetPort: 80
     protocol: TCP
-    name: http

@@ -68,7 +68,7 @@ echo ""
 read -p "是否查看详细变更? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    cdk diff Services-PetStack
+    cdk diff Services
     echo ""
 fi
 
@@ -93,7 +93,7 @@ echo -e "${YELLOW}[7/8] 开始部署...${NC}"
 echo "这可能需要 15-20 分钟，请耐心等待..."
 echo ""
 
-cdk deploy Services-PetStack --require-approval never
+cdk deploy Services --require-approval never
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ 部署成功！${NC}"
@@ -101,7 +101,7 @@ else
     echo -e "${RED}✗ 部署失败${NC}"
     echo -e "${YELLOW}可以尝试:${NC}"
     echo "  1. 查看 CloudFormation 控制台的错误详情"
-    echo "  2. 运行: cdk deploy Services-PetStack --verbose"
+    echo "  2. 运行: cdk deploy Services --verbose"
     echo "  3. 如需回滚: 恢复备份文件并重新部署"
     exit 1
 fi
@@ -112,7 +112,7 @@ echo -e "${YELLOW}[8/8] 获取部署信息...${NC}"
 echo ""
 
 # 获取 Stack 输出
-STACK_NAME="Services-PetStack"
+STACK_NAME="Services"
 echo "正在从 CloudFormation 获取输出..."
 echo ""
 

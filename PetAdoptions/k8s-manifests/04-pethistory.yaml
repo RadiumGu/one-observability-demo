@@ -1,0 +1,108 @@
+# PetHistory - Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pethistory-deployment
+  namespace: petadoptions
+  labels:
+    app: pethistory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pethistory
+  template:
+    metadata:
+      labels:
+        app: pethistory
+    spec:
+      serviceAccountName: pethistory-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: pethistory
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: pethistory
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      containers:
+      - name: pethistory
+        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/pet-adoptions-history:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: AWS_XRAY_DAEMON_ADDRESS
+          value: "xray-service.default:2000"
+        - name: AWS_REGION
+          value: "<AWS_REGION>"
+        - name: OTEL_OTLP_ENDPOINT
+          value: "localhost:4317"
+        - name: OTEL_RESOURCE
+          value: "ClusterName=PetSite"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.namespace=AWSObservability,service.name=PetAdoptionsHistory"
+        - name: S3_REGION
+          value: "<AWS_REGION>"
+        - name: OTEL_METRICS_EXPORTER
+          value: "otlp"
+        - name: RDS_SECRET_ARN
+          value: "REPLACE_WITH_RDS_SECRET_ARN"
+        - name: UPDATE_ADOPTION_URL
+          value: "REPLACE_WITH_UPDATE_ADOPTION_URL"
+        livenessProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+      - name: aws-otel-collector
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        args:
+        - --config=/etc/otel-config/otel-config.yaml
+        env:
+        - name: AWS_REGION
+          value: "<AWS_REGION>"
+        resources:
+          requests:
+            cpu: "32m"
+            memory: "24Mi"
+          limits:
+            cpu: "256m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: otel-config
+          mountPath: /etc/otel-config
+      volumes:
+      - name: otel-config
+        configMap:
+          name: otel-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pethistory-service
+  namespace: petadoptions
+  labels:
+    app: pethistory
+spec:
+  type: ClusterIP
+  selector:
+    app: pethistory
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP

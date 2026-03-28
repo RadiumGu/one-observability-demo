@@ -2,7 +2,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: petsite
+  name: petsite-deployment
   namespace: petadoptions
   labels:
     app: petsite
@@ -15,57 +15,92 @@ spec:
     metadata:
       labels:
         app: petsite
-        version: v1
     spec:
-      nodeSelector:
-        arch: arm64
+      serviceAccountName: petsite-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: petsite
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: petsite
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
       containers:
       - name: petsite
         image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/petsite:latest
+        imagePullPolicy: Always
         ports:
         - containerPort: 80
-          name: http
+          protocol: TCP
         env:
-        - name: AWS_REGION
-          value: "<AWS_REGION>"
-        - name: INTERNAL_ALB_DNS
-          valueFrom:
-            configMapKeyRef:
-              name: petadoptions-config
-              key: internal_alb_dns
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 80
-          initialDelaySeconds: 10
-          periodSeconds: 5
+        - name: AWS_XRAY_DAEMON_ADDRESS
+          value: "xray-service.default:2000"
+        - name: DOTNET_PerfMapEnabled
+          value: "1"
+        - name: DOTNET_EnableWriteXorExecute
+          value: "0"
+        - name: DOTNET_JitCollect64BitCounts
+          value: "1"
         resources:
           requests:
+            cpu: "50m"
             memory: "256Mi"
-            cpu: "250m"
           limits:
-            memory: "512Mi"
             cpu: "500m"
+            memory: "1Gi"
+      - name: aws-otel-collector
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        env:
+        - name: AOT_CONFIG_CONTENT
+          value: |
+            receivers:
+              otlp:
+                protocols:
+                  grpc:
+                    endpoint: 0.0.0.0:4317
+                  http:
+                    endpoint: 0.0.0.0:4318
+            processors:
+              batch/traces:
+                timeout: 1s
+                send_batch_size: 50
+            exporters:
+              awsxray:
+                region: <AWS_REGION>
+            service:
+              pipelines:
+                traces:
+                  receivers: [otlp]
+                  processors: [batch/traces]
+                  exporters: [awsxray]
+        resources:
+          requests:
+            cpu: "32m"
+            memory: "256Mi"
+          limits:
+            cpu: "256m"
+            memory: "256Mi"
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: petsite-service
+  name: service-petsite
   namespace: petadoptions
   labels:
     app: petsite
+  annotations:
+    prometheus.io/scrape: "true"
+    scrape: "true"
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: petsite
   ports:
   - port: 80
     targetPort: 80
     protocol: TCP
-    name: http

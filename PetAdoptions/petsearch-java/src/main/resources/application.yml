@@ -4,7 +4,7 @@ spring:
 cloud:
   aws:
     region:
-      static: eu-west-1
+      static: ap-northeast-1
       auto: false
 server:
   port: 80

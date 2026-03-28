@@ -57,7 +57,7 @@ def get_rds_connection_parameters(secret_id, region):
     c = json.loads(jsonstr)
 
     u = {
-        'database': c['dbname'],
+        'dbname': c['dbname'],
         'user':     c['username'],
         'password': c['password'],
         'host':     c['host']

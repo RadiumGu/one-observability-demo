@@ -25,13 +25,13 @@ export class StatusUpdaterService extends Construct {
       ]
     });
     
-    var layerArn = "arn:aws:lambda:"+ process.env.CDK_DEFAULT_REGION +":580247275435:layer:LambdaInsightsExtension:21";
+    var layerArn = "arn:aws:lambda:"+ process.env.CDK_DEFAULT_REGION +":580247275435:layer:LambdaInsightsExtension-Arm64:42";
     var layer = lambda.LayerVersion.fromLayerVersionArn(this, `LayerFromArn`, layerArn);
 
     const lambdaFunction = new nodejslambda.NodejsFunction(this, 'lambdafn', {
-        runtime: lambda.Runtime.NODEJS_16_X,    // execution environment
+        runtime: lambda.Runtime.NODEJS_22_X,
+        architecture: lambda.Architecture.ARM_64,
         entry: '../../petstatusupdater/index.js',
-        depsLockFilePath: '../../petstatusupdater/package-lock.json',
         handler: 'handler',
         memorySize: 128,
         tracing: lambda.Tracing.ACTIVE,
@@ -43,10 +43,8 @@ export class StatusUpdaterService extends Construct {
         },
         bundling: {
           externalModules: [
-            'aws-sdk'
-          ],
-          nodeModules: [
-             'aws-xray-sdk'
+             'aws-sdk',
+             '@aws-sdk/*'
           ]
         }
     });

@@ -24,7 +24,9 @@ export interface EcsServiceProps {
 
   region: string,
 
-  securityGroup: ec2.SecurityGroup
+  securityGroup: ec2.SecurityGroup,
+  
+  publicLoadBalancer?: boolean
 }
 
 export abstract class EcsService extends Construct {
@@ -154,7 +156,7 @@ export abstract class EcsService extends Construct {
       this.service = new ecs_patterns.ApplicationLoadBalancedFargateService(this, "ecs-service", {
         cluster: props.cluster,
         taskDefinition: this.taskDefinition,
-        publicLoadBalancer: true,
+        publicLoadBalancer: props.publicLoadBalancer ?? false,
         desiredCount: props.desiredTaskCount,
         listenerPort: 80,
         securityGroups: [props.securityGroup]

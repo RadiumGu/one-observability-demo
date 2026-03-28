@@ -1,10 +1,12 @@
 {
   "app": "npx ts-node app/pet_stack.ts",
   "context": {
+    "deployment_mode": "eks",
     "vpc_cidr": "11.0.0.0/16",
+    "cluster_name": "PetSite",
     "snstopic_email": "someone@example.com",
     "rdsusername": "petadmin",
     "petsite_on_eks": "true",
-    "@aws-cdk/core:bootstrapQualifier": "hnb660fds"
+    "acm_certificate_arn": "arn:aws:acm:ap-northeast-1:926093770964:certificate/a661c9dd-c539-48b8-bb7f-ea8d8e46da9d"
   }
 }

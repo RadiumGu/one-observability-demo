@@ -100,6 +100,25 @@ export class PetAdoptionsHistory extends EksApplication {
     deploymentYaml[2].spec.template.spec.containers[0].env[1].value = props.region;
     deploymentYaml[2].spec.template.spec.containers[0].env[3].value = `ClusterName=${props.cluster.clusterName}`;
     deploymentYaml[2].spec.template.spec.containers[0].env[5].value = props.region;
+    
+    // Add RDS_SECRET_ARN environment variable
+    deploymentYaml[2].spec.template.spec.containers[0].env.push({
+        name: 'RDS_SECRET_ARN',
+        value: props.rdsSecretArn
+    });
+    
+    // Add UPDATE_ADOPTION_URL from SSM Parameter Store
+    const updateAdoptionUrl = ssm.StringParameter.fromStringParameterAttributes(
+        this, 
+        'getUpdateAdoptionUrl', 
+        { parameterName: "/petstore/updateadoptionstatusurl" }
+    ).stringValue;
+    
+    deploymentYaml[2].spec.template.spec.containers[0].env.push({
+        name: 'UPDATE_ADOPTION_URL',
+        value: updateAdoptionUrl
+    });
+    
     deploymentYaml[2].spec.template.spec.containers[1].env[0].value = props.region;
     deploymentYaml[3].spec.targetGroupARN = props.targetGroupArn;
 

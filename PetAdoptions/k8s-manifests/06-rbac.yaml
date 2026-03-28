@@ -1,0 +1,60 @@
+---
+# RBAC - ClusterRole for OTEL Prometheus scraping
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pethistory-otel-prometheus-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - nonResourceURLs:
+    - /metrics
+    verbs:
+    - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pethistory-otel-prometheus-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pethistory-otel-prometheus-role
+subjects:
+  - kind: ServiceAccount
+    name: pethistory-sa
+    namespace: petadoptions
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-awseksresourcedetector-role
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aws-auth
+      - cluster-info
+    resources:
+      - configmaps
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-awseksresourcedetector-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-awseksresourcedetector-role
+subjects:
+  - kind: ServiceAccount
+    name: pethistory-sa
+    namespace: petadoptions

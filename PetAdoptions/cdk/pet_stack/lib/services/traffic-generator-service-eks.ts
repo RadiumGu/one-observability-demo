@@ -1,4 +1,4 @@
-import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
+import { DockerImageAsset, Platform } from 'aws-cdk-lib/aws-ecr-assets';
 import { EksService, EksServiceProps } from './eks-service';
 import { Construct } from 'constructs';
 
@@ -16,6 +16,7 @@ export class TrafficGeneratorServiceEks extends EksService {
   createContainerImage(): DockerImageAsset {
     return new DockerImageAsset(this, 'traffic-generator-image', {
       directory: './resources/microservices/trafficgenerator/trafficgenerator',
+      platform: Platform.LINUX_ARM64,
     });
   }
 }

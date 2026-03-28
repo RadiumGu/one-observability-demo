@@ -1,14 +1,11 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.8
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# prerequisites for building psycopg2
-RUN apt-get update && apt-get install -y build-essential python3-dev libpq-dev
-
 COPY requirements.txt requirements.txt
-RUN pip3 install -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
 ENV FLASK_APP=petadoptionshistory

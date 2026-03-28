@@ -1,0 +1,94 @@
+# Traffic Generator - Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-generator
+  namespace: petadoptions
+  labels:
+    app: traffic-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-generator
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: traffic-generator
+    spec:
+      serviceAccountName: traffic-generator-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: traffic-generator
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: traffic-generator
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      initContainers:
+      - name: install-cert
+        image: alpine:3.18
+        command:
+        - sh
+        - -c
+        - >
+          apk add --no-cache ca-certificates &&
+          cp /tmp/alb-cert/alb-selfsigned.crt /usr/local/share/ca-certificates/ &&
+          update-ca-certificates &&
+          cp /etc/ssl/certs/ca-certificates.crt /shared-certs/ca-certificates.crt
+        env:
+        - name: petsiteurl
+          value: "http://REPLACE_WITH_ALB_DNS:8080"
+        volumeMounts:
+        - name: alb-cert
+          mountPath: /tmp/alb-cert
+        - name: ca-bundle
+          mountPath: /shared-certs
+      containers:
+      - name: traffic-generator
+        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/trafficgenerator:latest
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        env:
+        - name: AWS_REGION
+          value: "<AWS_REGION>"
+        - name: petsiteurl
+          value: "http://REPLACE_WITH_ALB_DNS:8080"
+        - name: DOTNET_PerfMapEnabled
+          value: "1"
+        - name: DOTNET_EnableWriteXorExecute
+          value: "0"
+        - name: DOTNET_JitCollect64BitCounts
+          value: "1"
+        - name: searchapiurl
+          value: "http://search-service.petadoptions.svc.cluster.local/api/search?"
+        - name: SSL_CERT_FILE
+          value: "/etc/ssl/certs/ca-certificates.crt"
+        resources:
+          requests:
+            cpu: "256m"
+            memory: "512Mi"
+          limits:
+            cpu: "256m"
+            memory: "512Mi"
+        volumeMounts:
+        - name: ca-bundle
+          mountPath: /etc/ssl/certs
+          readOnly: true
+      volumes:
+      - name: alb-cert
+        configMap:
+          name: alb-selfsigned-cert
+      - name: ca-bundle
+        emptyDir: {}

@@ -28,7 +28,25 @@ namespace trafficgenerator
         {
             _logger = logger;
 
-            _httpClient = new HttpClient();
+            var handler = new HttpClientHandler
+            {
+                // Allow self-signed certs (ALB may use ACM cert not in container trust store)
+                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            };
+            _httpClient = new HttpClient(handler);
+            
+            // Add custom header for ALB rule to bypass Cognito auth
+            var trafficHeader = configuration["TRAFFIC_GENERATOR_HEADER"];
+            if (!string.IsNullOrEmpty(trafficHeader))
+            {
+                var parts = trafficHeader.Split(':', 2);
+                if (parts.Length == 2)
+                {
+                    _httpClient.DefaultRequestHeaders.Add(parts[0], parts[1]);
+                    logger.LogInformation($"Added traffic header: {parts[0]}");
+                }
+            }
+            
             _petSiteUrl = configuration["petsiteurl"];
             _petSearchUrl = configuration["searchapiurl"];
             _trafficdelaytime = configuration["trafficdelaytime"];

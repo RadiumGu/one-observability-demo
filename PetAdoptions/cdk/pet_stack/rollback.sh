@@ -90,7 +90,7 @@ echo -e "${YELLOW}[4/5] 预览回滚变更...${NC}"
 read -p "是否查看详细变更? (y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    cdk diff Services-PetStack
+    cdk diff Services
     echo ""
 fi
 
@@ -99,7 +99,7 @@ echo -e "${YELLOW}[5/5] 执行回滚部署...${NC}"
 echo "这可能需要 15-20 分钟..."
 echo ""
 
-cdk deploy Services-PetStack --require-approval never
+cdk deploy Services --require-approval never
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}========================================${NC}"
@@ -111,7 +111,7 @@ if [ $? -eq 0 ]; then
     
     # 获取新的 ALB 信息
     echo "获取 ALB 信息..."
-    STACK_NAME="Services-PetStack"
+    STACK_NAME="Services"
     PETSITE_URL=$(aws cloudformation describe-stacks \
         --stack-name $STACK_NAME \
         --query 'Stacks[0].Outputs[?OutputKey==`PetSiteUrl`].OutputValue' \
@@ -137,6 +137,6 @@ else
     echo "如需手动恢复:"
     echo "  1. 恢复文件: cp $UNIFIED_BACKUP lib/services.ts"
     echo "  2. 重新编译: npm run build"
-    echo "  3. 重新部署: cdk deploy Services-PetStack"
+    echo "  3. 重新部署: cdk deploy Services"
     exit 1
 fi

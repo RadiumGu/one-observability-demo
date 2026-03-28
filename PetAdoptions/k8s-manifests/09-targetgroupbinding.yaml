@@ -1,0 +1,28 @@
+# TargetGroupBinding — ALB integration
+#
+# These bind K8s services to ALB target groups created by CDK.
+# Replace the target group ARN placeholders with actual values.
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: petsite-tgb
+  namespace: petadoptions
+spec:
+  targetGroupARN: "REPLACE_WITH_PETSITE_TARGET_GROUP_ARN"
+  targetType: ip
+  serviceRef:
+    name: service-petsite
+    port: 80
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: pethistory-tgb
+  namespace: petadoptions
+spec:
+  targetGroupARN: "REPLACE_WITH_PETHISTORY_TARGET_GROUP_ARN"
+  targetType: ip
+  serviceRef:
+    name: pethistory-service
+    port: 8080
