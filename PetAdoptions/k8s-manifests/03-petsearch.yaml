@@ -66,7 +66,7 @@ spec:
             cpu: "512m"
             memory: "1Gi"
       - name: aws-otel-collector
-        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0
         env:
         - name: AOT_CONFIG_CONTENT
           value: |

@@ -11,6 +11,7 @@ export interface EksServiceProps {
   memory: string;
   replicas: number;
   port?: number;
+  containerPort?: number;  // If different from service port (e.g., petsite: service=80, container=8080)
   healthCheck?: string;
   serviceType?: 'ClusterIP' | 'LoadBalancer';
   region: string;
@@ -33,6 +34,7 @@ export abstract class EksService extends Construct {
     const serviceName = id.toLowerCase();
     this.serviceName = serviceName;
     const port = props.port || 80;
+    const containerPort = props.containerPort || port;
     const namespace = 'petadoptions';
 
     // Create Service Account with IRSA
@@ -62,7 +64,7 @@ export abstract class EksService extends Construct {
     const containers: any[] = [{
       name: serviceName,
       image: imageUri,
-      ports: [{ containerPort: port }],
+      ports: [{ containerPort: containerPort }],
       env: envVars,
       resources: {
         requests: {
@@ -78,7 +80,7 @@ export abstract class EksService extends Construct {
         livenessProbe: {
           httpGet: {
             path: props.healthCheck,
-            port: port,
+            port: containerPort,
           },
           initialDelaySeconds: 30,
           periodSeconds: 10,
@@ -86,7 +88,7 @@ export abstract class EksService extends Construct {
         readinessProbe: {
           httpGet: {
             path: props.healthCheck,
-            port: port,
+            port: containerPort,
           },
           initialDelaySeconds: 5,
           periodSeconds: 5,
@@ -99,7 +101,7 @@ export abstract class EksService extends Construct {
       // Use AOT_CONFIG_CONTENT env var to pass config inline - no ConfigMap needed
       containers.push({
         name: 'aws-otel-collector',
-        image: 'public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1',
+        image: 'public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0',
         env: [{
           name: 'AOT_CONFIG_CONTENT',
           value: [
@@ -222,7 +224,7 @@ export abstract class EksService extends Construct {
           selector: { app: serviceName },
           ports: [{
             port: port,
-            targetPort: port,
+            targetPort: containerPort,
             protocol: 'TCP',
           }],
         },

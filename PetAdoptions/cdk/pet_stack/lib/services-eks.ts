@@ -196,7 +196,7 @@ export class ServicesEks2 extends Stack {
     alb.node.addDependency(theVPC.internetConnectivityEstablished);
 
     const targetGroup = new elbv2.ApplicationTargetGroup(this, 'PetSiteTargetGroup', {
-      port: 80,
+      port: 8080,
       protocol: elbv2.ApplicationProtocol.HTTP,
       vpc: theVPC,
       targetType: elbv2.TargetType.IP,
@@ -772,21 +772,21 @@ def handler(event, context):
           '/petstore/dynamodbtablename': dynamodb_petadoption.tableName,
           '/petstore/s3bucketname': s3_observabilitypetadoptions.bucketName,
           // EKS internal service URLs - services communicate via k8s service discovery
-          '/petstore/searchapiurl': `http://search-service.default.svc.cluster.local/api/search?`,
+          '/petstore/searchapiurl': `http://search-service.petadoptions.svc.cluster.local/api/search?`,
           '/petstore/searchimage': 'petsearch-java:latest',
-          '/petstore/petlistadoptionsurl': `http://list-adoptions.default.svc.cluster.local/api/adoptionlist/`,
-          '/petstore/petlistadoptionsmetricsurl': `http://list-adoptions.default.svc.cluster.local/metrics`,
-          '/petstore/paymentapiurl': `http://pay-for-adoption.default.svc.cluster.local/api/home/completeadoption`,
-          '/petstore/payforadoptionmetricsurl': `http://pay-for-adoption.default.svc.cluster.local/metrics`,
-          '/petstore/cleanupadoptionsurl': `http://pay-for-adoption.default.svc.cluster.local/api/home/cleanupadoptions`,
+          '/petstore/petlistadoptionsurl': `http://list-adoptions.petadoptions.svc.cluster.local/api/adoptionlist/`,
+          '/petstore/petlistadoptionsmetricsurl': `http://list-adoptions.petadoptions.svc.cluster.local/metrics`,
+          '/petstore/paymentapiurl': `http://pay-for-adoption.petadoptions.svc.cluster.local/api/home/completeadoption`,
+          '/petstore/payforadoptionmetricsurl': `http://pay-for-adoption.petadoptions.svc.cluster.local/metrics`,
+          '/petstore/cleanupadoptionsurl': `http://pay-for-adoption.petadoptions.svc.cluster.local/api/home/cleanupadoptions`,
           '/petstore/petsearch-collector-manual-config': readFileSync('./resources/collector/ecs-xray-manual.yaml', 'utf8'),
           '/petstore/rdssecretarn': `${auroraCluster.secret?.secretArn}`,
           '/petstore/rdsendpoint': auroraCluster.clusterEndpoint.hostname,
           '/petstore/rds-reader-endpoint': auroraCluster.clusterReadEndpoint.hostname,
           '/petstore/stackname': stackName,
           // Use internal k8s service DNS to bypass ALB Cognito auth for traffic generator
-          '/petstore/petsiteurl': 'http://service-petsite.default.svc.cluster.local',
-          '/petstore/pethistoryurl': 'http://pethistory-service.default.svc.cluster.local:8080/petadoptionshistory',
+          '/petstore/petsiteurl': 'http://service-petsite.petadoptions.svc.cluster.local',
+          '/petstore/pethistoryurl': 'http://pethistory-service.petadoptions.svc.cluster.local:8080/petadoptionshistory',
           '/eks/petsite/OIDCProviderUrl': cluster.clusterOpenIdConnectIssuerUrl,
           '/eks/petsite/OIDCProviderArn': cluster.openIdConnectProvider.openIdConnectProviderArn,
           '/petstore/errormode1': 'false',

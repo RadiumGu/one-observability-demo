@@ -189,7 +189,7 @@ export abstract class EcsService extends Construct {
 
   private addOtelCollectorContainer(taskDefinition: ecs.FargateTaskDefinition, logging: ecs.AwsLogDriver) {
     taskDefinition.addContainer('aws-otel-collector', {
-      image: ecs.ContainerImage.fromRegistry('public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1'),
+      image: ecs.ContainerImage.fromRegistry('public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0'),
       memoryLimitMiB: 256,
       cpu: 256,
       command: ["--config", "/etc/ecs/ecs-xray.yaml"],

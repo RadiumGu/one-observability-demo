@@ -93,7 +93,7 @@ spec:
             cpu: "500m"
             memory: "1Gi"
       - name: aws-otel-collector
-        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0
         args: ["--config=/etc/otel-config/otel-config.yaml"]
         env:
         - name: AWS_REGION

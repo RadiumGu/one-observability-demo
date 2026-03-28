@@ -5,20 +5,20 @@ metadata:
   annotations:
     eks.amazonaws.com/role-arn: "{{PETSITE_SA_ROLE}}"
   name: petsite-sa
-  namespace: default
+  namespace: petadoptions
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: service-petsite
-  namespace: default
+  namespace: petadoptions
   annotations:
     scrape: "true"
     prometheus.io/scrape: "true"
 spec:
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP
   type: ClusterIP
   selector:
@@ -28,7 +28,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: petsite-deployment
-  namespace: default
+  namespace: petadoptions
 spec:
   selector:
     matchLabels:
@@ -39,19 +39,16 @@ spec:
       labels:
         app: petsite
     spec:
-      # 打散策略：
-      # 1. 跨 AZ 均匀分布（AZ 故障时只影响一半副本）
-      # 2. 跨 Node 均匀分布（单节点故障时只影响一半副本）
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: topology.kubernetes.io/zone
-        whenUnsatisfiable: DoNotSchedule
+        whenUnsatisfiable: ScheduleAnyway
         labelSelector:
           matchLabels:
             app: petsite
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: DoNotSchedule
+        whenUnsatisfiable: ScheduleAnyway
         labelSelector:
           matchLabels:
             app: petsite
@@ -61,16 +58,19 @@ spec:
         imagePullPolicy: Always
         name: petsite
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           protocol: TCP
         env:
         - name: AWS_XRAY_DAEMON_ADDRESS
-          value: xray-service.default:2000
+          value: xray-service.petadoptions:2000
+        - name: ASPNETCORE_URLS
+          value: "http://+:8080"
 ---
 apiVersion: elbv2.k8s.aws/v1beta1
 kind: TargetGroupBinding
 metadata:
   name: petsite-tgb
+  namespace: petadoptions
 spec:
   serviceRef:
     name: service-petsite

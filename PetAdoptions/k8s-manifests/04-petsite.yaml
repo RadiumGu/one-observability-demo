@@ -35,7 +35,7 @@ spec:
         image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_REGION>.amazonaws.com/petadoptions/petsite:latest
         imagePullPolicy: Always
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           protocol: TCP
         env:
         - name: AWS_XRAY_DAEMON_ADDRESS
@@ -54,7 +54,7 @@ spec:
             cpu: "500m"
             memory: "1Gi"
       - name: aws-otel-collector
-        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.41.1
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0
         env:
         - name: AOT_CONFIG_CONTENT
           value: |
@@ -102,5 +102,5 @@ spec:
     app: petsite
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP

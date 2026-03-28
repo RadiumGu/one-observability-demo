@@ -1,7 +1,6 @@
 FROM mcr.microsoft.com/dotnet/aspnet:7.0-bullseye-slim AS base
 WORKDIR /app
-EXPOSE 80
-EXPOSE 443
+EXPOSE 8080
 
 FROM mcr.microsoft.com/dotnet/sdk:7.0-bullseye-slim AS build
 WORKDIR /src
@@ -14,6 +13,6 @@ RUN dotnet publish "PetSite.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
-#ENV AWS_XRAY_DAEMON_ADDRESS=xray-service.default
+ENV ASPNETCORE_URLS=http://+:8080
 COPY --from=publish /app/publish .
 ENTRYPOINT ["dotnet", "PetSite.dll"]
