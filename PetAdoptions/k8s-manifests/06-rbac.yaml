@@ -58,3 +58,49 @@ subjects:
   - kind: ServiceAccount
     name: pethistory-sa
     namespace: petadoptions
+---
+# =============================================================================
+# Neptune ETL Lambda 读权限 (for graph-dependency-platform)
+# =============================================================================
+# neptune-etl-from-deepflow Lambda 需要调用 K8s API 读取：
+#   - nodes (映射 Pod → AZ)
+#   - pods (服务拓扑)
+#   - deployments (resource limits)
+# 
+# 对应 IAM Role: arn:aws:iam::<account>:role/neptune-etl-lambda-role
+# 该 Role 通过 EKS Access Entry 映射到 K8s Group: neptune-etl-readers
+# (Access Entry 由 NeptuneEtlStack CDK 创建)
+# 
+# 如果 EKS Cluster 不存在该 Group 的 ClusterRoleBinding，K8s API 会拒绝请求，
+# 导致 ETL 无法采集 K8s 拓扑数据（batch upsert 0 nodes）。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: neptune-etl-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "services", "namespaces", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: neptune-etl-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: neptune-etl-reader
+subjects:
+  # neptune-etl-lambda-role 的 EKS Access Entry 将其映射到此 Group
+  - kind: Group
+    name: neptune-etl-readers
+    apiGroup: rbac.authorization.k8s.io
