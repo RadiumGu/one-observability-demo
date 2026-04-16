@@ -212,7 +212,7 @@ export class ServicesEks2 extends Stack {
     if (!acmCertificateArn) {
       throw new Error("Required CDK context 'acm_certificate_arn' is not set. Pass it via cdk.json or --context acm_certificate_arn=<arn>");
     }
-    const httpsListener = alb.addListener('HttpsListener', {
+    const httpsListener = alb.addListener('HttpsListenerV2', {
       port: 443,
       open: true,
       certificates: [elbv2.ListenerCertificate.fromArn(acmCertificateArn)],
@@ -242,9 +242,39 @@ export class ServicesEks2 extends Stack {
     });
 
     httpsListener.addTargetGroups('PetAdoptionsHistoryTargetGroups', {
-      priority: 10,
+      priority: 40,
       conditions: [elbv2.ListenerCondition.pathPatterns(['/petadoptionshistory/*'])],
       targetGroups: [petadoptionshistory_targetGroup],
+    });
+
+    // Streamlit (graph) - import existing TG
+    const streamlitTG = elbv2.ApplicationTargetGroup.fromTargetGroupAttributes(this, 'StreamlitTG', {
+      targetGroupArn: 'arn:aws:elasticloadbalancing:ap-northeast-1:926093770964:targetgroup/streamlit-demo-tg/aafb8e66ba257593',
+    });
+    httpsListener.addTargetGroups('StreamlitGraphRule', {
+      priority: 10,
+      conditions: [elbv2.ListenerCondition.pathPatterns(['/graph', '/graph/*'])],
+      targetGroups: [streamlitTG],
+    });
+
+    // Neptune UI - import existing TG
+    const neptuneTG = elbv2.ApplicationTargetGroup.fromTargetGroupAttributes(this, 'NeptuneUITG', {
+      targetGroupArn: 'arn:aws:elasticloadbalancing:ap-northeast-1:926093770964:targetgroup/neptune-ui-tg/d124ff14d7b45d36',
+    });
+    httpsListener.addTargetGroups('NeptuneUIRule', {
+      priority: 20,
+      conditions: [elbv2.ListenerCondition.pathPatterns(['/neptune-ui', '/neptune-ui/*', '/neptune-api', '/neptune-api/*'])],
+      targetGroups: [neptuneTG],
+    });
+
+    // Grafana (deepflow) - import existing TG
+    const grafanaTG = elbv2.ApplicationTargetGroup.fromTargetGroupAttributes(this, 'GrafanaTG', {
+      targetGroupArn: 'arn:aws:elasticloadbalancing:ap-northeast-1:926093770964:targetgroup/deepflow-grafana-tg/e8a80adef75f7bda',
+    });
+    httpsListener.addTargetGroups('GrafanaRule', {
+      priority: 30,
+      conditions: [elbv2.ListenerCondition.pathPatterns(['/grafana', '/grafana/*'])],
+      targetGroups: [grafanaTG],
     });
 
     new ssm.StringParameter(this, 'putPetHistoryParamTargetGroupArn', {
@@ -351,22 +381,37 @@ def handler(event, context):
       ]),
     });
 
-    // 手动添加 NodeGroup，使用 ARM64 实例，部署在私有子网避免公网 IP
-    const nodegroup = cluster.addNodegroupCapacity('workers', {
+    // NodeGroup 1a - 仅部署在 ap-northeast-1a
+    const nodegroupAZ1 = cluster.addNodegroupCapacity('workers-1a', {
       instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.LARGE)],
-      minSize: 4,
-      maxSize: 6,
-      desiredSize: 4,
+      minSize: 2,
+      maxSize: 3,
+      desiredSize: 2,
       amiType: eks.NodegroupAmiType.AL2023_ARM_64_STANDARD,
-      subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },  // 强制使用私有子网
+      subnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        availabilityZones: ['ap-northeast-1a'],
+      },
     });
+    nodegroupAZ1.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
+
+    // NodeGroup 1c - 仅部署在 ap-northeast-1c
+    const nodegroupAZ2 = cluster.addNodegroupCapacity('workers-1c', {
+      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.LARGE)],
+      minSize: 2,
+      maxSize: 3,
+      desiredSize: 2,
+      amiType: eks.NodegroupAmiType.AL2023_ARM_64_STANDARD,
+      subnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        availabilityZones: ['ap-northeast-1c'],
+      },
+    });
+    nodegroupAZ2.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
 
     const clusterSG = ec2.SecurityGroup.fromSecurityGroupId(this, 'ClusterSG', cluster.clusterSecurityGroupId);
     clusterSG.addIngressRule(albSG, ec2.Port.allTraffic(), 'Allow traffic from the ALB');
     clusterSG.addIngressRule(ec2.Peer.ipv4(vpcCidr), ec2.Port.tcp(443), 'Allow local access to k8s api');
-
-    // Add SSM Permissions to the node role
-    nodegroup.role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
 
     // From https://github.com/aws-samples/ssm-agent-daemonset-installer
     var ssmAgentSetup = yaml.loadAll(readFileSync('./resources/setup-ssm-agent.yaml', 'utf8')) as Record<string, any>[];
@@ -587,7 +632,7 @@ def handler(event, context):
     // PayForAdoption service - EKS deployment
     const payForAdoptionService = new PayForAdoptionServiceEks(this, 'pay-for-adoption', {
       cluster: cluster,
-      cpu: '512m',
+      cpu: '128m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
@@ -603,7 +648,7 @@ def handler(event, context):
     // ListAdoptions service - EKS deployment
     const listAdoptionsService = new ListAdoptionsServiceEks(this, 'list-adoptions', {
       cluster: cluster,
-      cpu: '512m',
+      cpu: '128m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
@@ -618,7 +663,7 @@ def handler(event, context):
     // Search service - EKS deployment
     const searchService = new SearchServiceEks(this, 'search-service', {
       cluster: cluster,
-      cpu: '512m',
+      cpu: '128m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
@@ -632,7 +677,7 @@ def handler(event, context):
     // Traffic Generator service - EKS deployment
     const trafficGeneratorService = new TrafficGeneratorServiceEks(this, 'traffic-generator', {
       cluster: cluster,
-      cpu: '256m',
+      cpu: '64m',
       memory: '512Mi',
       replicas: 1,
       instrumentation: 'none',
