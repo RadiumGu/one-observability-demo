@@ -7,6 +7,6 @@
     "snstopic_email": "someone@example.com",
     "rdsusername": "petadmin",
     "petsite_on_eks": "true",
-    "acm_certificate_arn": "arn:aws:acm:ap-northeast-1:926093770964:certificate/a661c9dd-c539-48b8-bb7f-ea8d8e46da9d"
+    "acm_certificate_arn": "arn:aws:acm:ap-northeast-1:926093770964:certificate/ce750241-29aa-4e22-8b5a-b98d7364ea7a"
   }
 }
