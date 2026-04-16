@@ -2,11 +2,14 @@
 # PetHistory standalone deployment manifest
 # NOTE: 主要的部署配置在 k8s-manifests/04-pethistory.yaml
 #       此文件保留用于独立部署/调试 pethistory 服务
+#
+# ❗ 部署前必须替换 REPLACE_WITH_* 占位符！
+#    推荐使用 deploy-k8s.sh 统一部署，不要直接 kubectl apply 此文件。
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   annotations:
-    eks.amazonaws.com/role-arn: "{{PETSITE_SA_ROLE}}"
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_PETSITE_SA_ROLE"
   name: pethistory-sa
   namespace: petadoptions
 ---
@@ -54,7 +57,7 @@ spec:
         topologyKey: kubernetes.io/hostname
         whenUnsatisfiable: ScheduleAnyway
       containers:
-      - image: "{{ECR_IMAGE_URL}}"
+      - image: "REPLACE_WITH_ECR_IMAGE_URL"
         imagePullPolicy: Always
         name: pethistory
         ports:
@@ -64,21 +67,21 @@ spec:
         - name: AWS_XRAY_DAEMON_ADDRESS
           value: xray-service.default:2000
         - name: AWS_REGION
-          value: "{{AWS_REGION}}"
+          value: "REPLACE_WITH_AWS_REGION"
         - name: OTEL_OTLP_ENDPOINT
           value: "localhost:4317"
         - name: OTEL_RESOURCE
-          value: ClusterName={{CLUSTER_NAME}}
+          value: ClusterName=REPLACE_WITH_CLUSTER_NAME
         - name: OTEL_RESOURCE_ATTRIBUTES
           value: "service.namespace=AWSObservability,service.name=PetAdoptionsHistory"
         - name: S3_REGION
-          value: "{{AWS_REGION}}"
+          value: "REPLACE_WITH_AWS_REGION"
         - name: OTEL_METRICS_EXPORTER
           value: "otlp"
         - name: RDS_SECRET_ARN
-          value: "{{RDS_SECRET_ARN}}"
+          value: "REPLACE_WITH_RDS_SECRET_ARN"
         - name: UPDATE_ADOPTION_URL
-          value: "{{UPDATE_ADOPTION_URL}}"
+          value: "REPLACE_WITH_UPDATE_ADOPTION_URL"
         livenessProbe:
           httpGet:
             path: /health/status
@@ -97,7 +100,7 @@ spec:
         args: ["--config=/etc/otel-config/otel-config.yaml"]
         env:
         - name: AWS_REGION
-          value: "{{AWS_REGION}}"
+          value: "REPLACE_WITH_AWS_REGION"
         resources:
           limits:
             cpu: 256m
@@ -122,7 +125,7 @@ spec:
   serviceRef:
     name: pethistory-service
     port: 8080
-  targetGroupARN: "{{TARGET_GROUP_ARN}}"
+  targetGroupARN: "REPLACE_WITH_TARGET_GROUP_ARN"
   targetType: ip
 ---
 apiVersion: rbac.authorization.k8s.io/v1
