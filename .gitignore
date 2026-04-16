@@ -6,3 +6,19 @@ PetAdoptions/payforadoption-go/petadoptions
 
 # editor settings
 .vscode/settings.json
+
+# Local debug/scratch files (graph-dp fork)
+*.backup
+*.before-*
+*.broken
+*.t4g
+*.t4g-al2023
+*.use-existing-vpc
+*.v131
+PetAdoptions/cdk/pet_stack/app/pet_stack.js
+PetAdoptions/cdk/pet_stack/deploy*.md
+PetAdoptions/cdk/pet_stack/GIT_SUMMARY.md
+PetAdoptions/SUMMARY_BUILD_K8S.md
+PetAdoptions/FIX-PETHISTORY.md
+cleanup-before-redeploy.sh
+d*.md
