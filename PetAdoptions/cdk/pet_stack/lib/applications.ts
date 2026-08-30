@@ -2,7 +2,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as eks from 'aws-cdk-lib/aws-eks';
 import * as resourcegroups from 'aws-cdk-lib/aws-resourcegroups';
-import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
+import { DockerImageAsset, Platform } from 'aws-cdk-lib/aws-ecr-assets';
 import * as yaml from 'js-yaml';
 import { Stack, StackProps, CfnJson, Fn, CfnOutput } from 'aws-cdk-lib';
 import { readFileSync } from 'fs';
@@ -77,6 +77,11 @@ export class Applications extends Stack {
     petstoreserviceaccount.addToPrincipalPolicy(startStepFnExecutionPolicy);
 
     const petsiteAsset = new DockerImageAsset(this, 'petsiteAsset', {
+        // 必须显式钉住 arm64：节点组是 t4g（AL2023_ARM_64_STANDARD），
+        // 不指定 platform 时 DockerImageAsset 跟随**构建宿主**架构 ——
+        // 在 x86 机器上构建会静默产出 amd64 镜像，放到 arm64 节点上根本起不来。
+        // 其余四个 EKS 服务镜像都已显式钉 LINUX_ARM64，只有入口服务 petsite 漏了。
+        platform: Platform.LINUX_ARM64,
         directory: "./resources/microservices/petsite/petsite/"
     });
 
