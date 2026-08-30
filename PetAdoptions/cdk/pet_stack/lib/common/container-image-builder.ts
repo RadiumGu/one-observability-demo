@@ -37,7 +37,15 @@ export class ContainerImageBuilder extends Construct {
         const image = new ecrassets.DockerImageAsset(this, props.repositoryName + 'DockerImageAsset', {
           directory: props.dockerImageAssetDirectory
         });
-        new ecrdeploy.ECRDeployment(this, props.repositoryName + 'DeployDockerImage', {
+        // 构造 id 从 'DeployDockerImage' 改为 'DeployDockerImageV2'：
+        // cdk-ecr-deployment 3.x -> 4.x 改变了它发出的 CFN 自定义资源**类型字符串**，
+        // 而 CloudFormation 不允许原地改变资源 type（ValidationError:
+        // "Update of resource type is not permitted"）。换逻辑 id 让 CFN 走
+        // create-new + delete-old，绕开这个限制。
+        //
+        // 这样做是安全的：ECRDeployment 只做「把镜像从 CDK 资产仓库复制到目标 ECR 仓库」，
+        // 重建会重跑一次复制（幂等），删除旧的自定义资源不会删掉已复制的镜像。
+        new ecrdeploy.ECRDeployment(this, props.repositoryName + 'DeployDockerImageV2', {
           src: new ecrdeploy.DockerImageName(image.imageUri),
           dest: new ecrdeploy.DockerImageName(repository.repositoryUri),
         });
