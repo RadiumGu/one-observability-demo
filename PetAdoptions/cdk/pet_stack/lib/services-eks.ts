@@ -381,9 +381,41 @@ def handler(event, context):
       ]),
     });
 
+    // 两个节点组按 AZ 拆分，各自只落在一个可用区 —— 这样 topologySpreadConstraints
+    // 的 zone 维度才有真实的域可分散。
+    //
+    // ⚠️ 改 instanceTypes 是**替换**操作，不是在线调参。
+    // 两个节点组都没有 launch template，而 EKS 托管节点组在这种情况下
+    // instanceTypes 不可原地修改（update-nodegroup-config 不接受该字段）。
+    // 因为这里没有显式指定 nodegroupName（物理名由 CloudFormation 生成，
+    // 实测形如 petsiteNodegroupworkers1a60-ZJElxYDbKT8H），CFN 可以
+    // **先建新节点组、再排空删除旧的**（create-then-delete），
+    // 期间会短暂存在 8 个节点。旧节点排空会驱逐其上所有 Pod。
+    //
+    // 配套前置：k8s-manifests/07-pdb.yaml 为 5 个业务服务加了
+    // minAvailable: 1 的 PodDisruptionBudget。此前整个集群只有 2 个 PDB
+    // 且都在 kube-system —— petadoptions 的服务在排空时毫无保障，
+    // 一次驱逐可以把两个副本同时赶走。改节点规格前必须先补上这个。
+    //
+    // large → xlarge 的两个理由（2026-08-30 实测）：
+    //   ① 容量：t4g.large 可分配 1930m，而观测栈自己就要 2054m
+    //      （cloudwatch 1300 + deepflow 550 + nfm 204）——比被观测的应用
+    //      （petadoptions 1892m）还多。四节点 7720m 里 80% 已被 request 占掉，
+    //      导致装不下一个 544m 的 Pod、search-service 两副本被挤在同一个 AZ。
+    //      xlarge 约 3900m/节点，总量翻倍到约 15,600m，容量不再是约束。
+    //   ② burstable 基线：credit 模式是 unlimited，持续超基线要付附加费。
+    //      t4g.large 基线 30%×2vCPU = 600m，而 1c 节点实测 676m **已经在超**；
+    //      t4g.xlarge 基线 40%×4vCPU = 1600m，覆盖现有全部实测用量
+    //      （节点实际 133m/140m/249m/676m）。所以涨价的一部分被省下的
+    //      附加费抵掉，不是净增。
+    //
+    // 成本（东京区按需，2026-08-30 经 Pricing API 核实）：
+    //   t4g.large  $0.0864/hr × 4 = $0.3456/hr ≈ $252/月
+    //   t4g.xlarge $0.1728/hr × 4 = $0.6912/hr ≈ $504/月   → 约 +$252/月
+
     // NodeGroup 1a - 仅部署在 ap-northeast-1a
     const nodegroupAZ1 = cluster.addNodegroupCapacity('workers-1a', {
-      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.LARGE)],
+      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.XLARGE)],
       minSize: 2,
       maxSize: 3,
       desiredSize: 2,
@@ -397,7 +429,7 @@ def handler(event, context):
 
     // NodeGroup 1c - 仅部署在 ap-northeast-1c
     const nodegroupAZ2 = cluster.addNodegroupCapacity('workers-1c', {
-      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.LARGE)],
+      instanceTypes: [ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.XLARGE)],
       minSize: 2,
       maxSize: 3,
       desiredSize: 2,
