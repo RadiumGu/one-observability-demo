@@ -9,6 +9,22 @@ export interface EksServiceProps {
   cluster: eks.Cluster;
   cpu: string;
   memory: string;
+  /**
+   * CPU limit。省略时回落到 `cpu`，保持「request == limit」的原有行为。
+   *
+   * 为什么需要把 request 与 limit 拆开：
+   * 原先两者共用 `props.cpu`，于是「request 反映稳态用量、limit 留突发余量」
+   * 这种正常配置在 CDK 里**根本无法表达**。实测后果是双向的：
+   *   · 把 cpu 设成能容纳突发的值（512m），request 就同样虚高，
+   *     而节点按 request 预留 —— 全集群装不下一个 544m 的 Pod，
+   *     搜索服务两个副本被挤在同一个 AZ（2026-08-29 实测）。
+   *   · 把 cpu 降到稳态用量（128m），limit 也一起降到 128m，
+   *     而 search-service 在压测下瞬时打到 520m，会被硬节流。
+   * 所以这不是「加个可选参数」，是补上一个原本缺失的表达能力。
+   */
+  cpuLimit?: string;
+  /** Memory limit。省略时回落到 `memory`，理由同 cpuLimit。 */
+  memoryLimit?: string;
   replicas: number;
   port?: number;
   containerPort?: number;  // If different from service port (e.g., petsite: service=80, container=8080)
@@ -72,8 +88,10 @@ export abstract class EksService extends Construct {
           memory: props.memory,
         },
         limits: {
-          cpu: props.cpu,
-          memory: props.memory,
+          // 未显式给 limit 时回落到 request，与改动前完全一致 ——
+          // 这样只有主动传 cpuLimit/memoryLimit 的服务会变，其余零影响。
+          cpu: props.cpuLimit ?? props.cpu,
+          memory: props.memoryLimit ?? props.memory,
         },
       },
       ...(props.healthCheck && {
