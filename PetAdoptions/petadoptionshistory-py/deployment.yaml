@@ -63,6 +63,16 @@ spec:
         ports:
         - containerPort: 8080
           protocol: TCP
+        # ⚠️ 刻意**不在**这里声明 RDS_SECRET_ARN 与 UPDATE_ADOPTION_URL。
+        # PetAdoptionsHistory 构造用 env.push() **追加**这两项（见
+        # lib/applications/pet-adoptions-history-application.ts:105 与 :117），
+        # 不是替换。若这里也声明，最终 manifest 会出现同名 env 两次 ——
+        # K8s 取最后一个，真值虽然会赢，但形状恶劣且极易误读。
+        #
+        # 相关的线上既有缺陷（2026-08-30 实测）：线上 pethistory 的
+        # UPDATE_ADOPTION_URL 当前值是字面量 `{{UPDATE_ADOPTION_URL}}` ——
+        # 因为 deploy-k8s.sh 的 sed 只替换 REPLACE_WITH_* 形式，
+        # 而被应用的那份文件里这一项还是旧的 {{}} 形式。走 CDK 部署会修好它。
         env:
         - name: AWS_XRAY_DAEMON_ADDRESS
           value: xray-service.default:2000
@@ -78,10 +88,6 @@ spec:
           value: "REPLACE_WITH_AWS_REGION"
         - name: OTEL_METRICS_EXPORTER
           value: "otlp"
-        - name: RDS_SECRET_ARN
-          value: "REPLACE_WITH_RDS_SECRET_ARN"
-        - name: UPDATE_ADOPTION_URL
-          value: "REPLACE_WITH_UPDATE_ADOPTION_URL"
         livenessProbe:
           httpGet:
             path: /health/status
