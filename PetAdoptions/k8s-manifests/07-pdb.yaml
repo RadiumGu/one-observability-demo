@@ -1,0 +1,80 @@
+# ⚠️ 双源警告 —— 见同目录其他文件头部的说明
+#
+# PodDisruptionBudget：节点排空/驱逐期间的最小可用副本保障
+#
+# 为什么加：2026-08-30 核查发现整个集群只有 2 个 PDB，且都在 kube-system
+# （coredns、ebs-csi-controller）—— **petadoptions 的 6 个服务一个都没有**。
+# 这意味着任何自愿驱逐（节点组替换、节点轮换、kubectl drain、
+# Cluster Autoscaler 缩容）都可以把一个服务的两个副本同时赶走，
+# 期间该服务完全不可用，而且不会有任何东西拦住它。
+#
+# 触发这次补齐的具体场景：把两个节点组从 t4g.large 换成 t4g.xlarge。
+# EKS 托管节点组的 instanceTypes 不可原地修改（两组都没有 launch template），
+# CloudFormation 只能**替换**节点组 —— 先建新的、再排空删旧的。
+# 排空是逐节点进行的，加上服务现在都跨 AZ 分布，实践中不至于全灭；
+# 但「实践中不至于」不是保障，PDB 才是。
+#
+# minAvailable: 1 而不是 maxUnavailable: 1 的理由：
+# 这些 Deployment 的 replicas 由 HPA 控制（min 2 / max 6），副本数是变动的。
+# minAvailable 用绝对值表达「至少留一个在跑」，在副本数变化时语义稳定；
+# maxUnavailable: 1 在副本数为 2 时等价，但扩到 6 时就变成允许同时干掉 1 个
+# ——含义随副本数漂移，不是这里想要的。
+#
+# 注意 PDB 会阻塞排空直到副本被重新调度成功。因为节点组替换是
+# create-then-delete（新节点先就绪），重新调度有落点，不会死锁。
+# 若将来改成 delete-then-create 或在容量紧张时排空，需要重估这一点。
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: petsite-pdb
+  namespace: petadoptions
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: petsite
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: search-service-pdb
+  namespace: petadoptions
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: search-service
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: list-adoptions-pdb
+  namespace: petadoptions
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: list-adoptions
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pay-for-adoption-pdb
+  namespace: petadoptions
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pay-for-adoption
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pethistory-pdb
+  namespace: petadoptions
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pethistory

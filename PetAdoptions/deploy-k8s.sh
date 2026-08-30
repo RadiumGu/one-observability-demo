@@ -113,6 +113,10 @@ echo ""
 
 # 部署 HPA
 echo -e "${YELLOW}[8/9] 部署 HPA...${NC}"
+# PodDisruptionBudget 必须在 HPA 之前应用 —— 先立排空保护，
+# 再开自动伸缩，避免伸缩过程中出现无保护的驱逐窗口。
+kubectl apply -f /tmp/k8s-manifests-deploy/07-pdb.yaml
+
 kubectl apply -f /tmp/k8s-manifests-deploy/08-hpa.yaml
 echo -e "${GREEN}✓ HPA 部署完成${NC}"
 echo ""
