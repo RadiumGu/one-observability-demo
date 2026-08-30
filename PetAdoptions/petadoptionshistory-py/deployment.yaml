@@ -1,0 +1,194 @@
+---
+# PetHistory standalone deployment manifest
+# NOTE: 主要的部署配置在 k8s-manifests/04-pethistory.yaml
+#       此文件保留用于独立部署/调试 pethistory 服务
+#
+# ❗ 部署前必须替换 REPLACE_WITH_* 占位符！
+#    推荐使用 deploy-k8s.sh 统一部署，不要直接 kubectl apply 此文件。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    eks.amazonaws.com/role-arn: "REPLACE_WITH_PETSITE_SA_ROLE"
+  name: pethistory-sa
+  namespace: petadoptions
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pethistory-service
+  namespace: petadoptions
+spec:
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
+  selector:
+    app: pethistory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pethistory-deployment
+  namespace: petadoptions
+spec:
+  selector:
+    matchLabels:
+      app: pethistory
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: pethistory
+    spec:
+      serviceAccountName: pethistory-sa
+      topologySpreadConstraints:
+      - labelSelector:
+          matchLabels:
+            app: pethistory
+        maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+      - labelSelector:
+          matchLabels:
+            app: pethistory
+        maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+      containers:
+      - image: "REPLACE_WITH_ECR_IMAGE_URL"
+        imagePullPolicy: Always
+        name: pethistory
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        env:
+        - name: AWS_XRAY_DAEMON_ADDRESS
+          value: xray-service.default:2000
+        - name: AWS_REGION
+          value: "REPLACE_WITH_AWS_REGION"
+        - name: OTEL_OTLP_ENDPOINT
+          value: "localhost:4317"
+        - name: OTEL_RESOURCE
+          value: ClusterName=REPLACE_WITH_CLUSTER_NAME
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "service.namespace=AWSObservability,service.name=PetAdoptionsHistory"
+        - name: S3_REGION
+          value: "REPLACE_WITH_AWS_REGION"
+        - name: OTEL_METRICS_EXPORTER
+          value: "otlp"
+        - name: RDS_SECRET_ARN
+          value: "REPLACE_WITH_RDS_SECRET_ARN"
+        - name: UPDATE_ADOPTION_URL
+          value: "REPLACE_WITH_UPDATE_ADOPTION_URL"
+        livenessProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            # 32m 是实测右调后的值（2026-08-30 压测中 5 分钟 40 样本：
+            # pod 级 p50 1m / p90 2m / p99 2m —— 全命名空间用量最低的服务）。
+            # 原先 50m 相对实际用量虚高约 25 倍。32m 是刻意设的下限，
+            # 仍留 16 倍余量；HPA 阈值 60%×(32+32)=38m ≈ p99 的 19 倍。
+            cpu: "32m"
+            memory: "128Mi"
+          limits:
+            # limit 保持 500m 不动 —— 它给的是突发上限，与 request 是两件事，
+            # 降 request 不应连带压缩突发能力（见 EksServiceProps.cpuLimit 的说明）。
+            cpu: "500m"
+            memory: "1Gi"
+      - name: aws-otel-collector
+        image: public.ecr.aws/aws-observability/aws-otel-collector:v0.47.0
+        args: ["--config=/etc/otel-config/otel-config.yaml"]
+        env:
+        - name: AWS_REGION
+          value: "REPLACE_WITH_AWS_REGION"
+        resources:
+          limits:
+            cpu: 256m
+            memory: 512Mi
+          requests:
+            cpu: 32m
+            memory: 24Mi
+        volumeMounts:
+        - name: otel-config
+          mountPath: /etc/otel-config
+      volumes:
+      - name: otel-config
+        configMap:
+          name: otel-config
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: pethistory-tgb
+  namespace: petadoptions
+spec:
+  serviceRef:
+    name: pethistory-service
+    port: 8080
+  targetGroupARN: "REPLACE_WITH_TARGET_GROUP_ARN"
+  targetType: ip
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pethistory-otel-prometheus-role
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - nonResourceURLs:
+    - /metrics
+    verbs:
+    - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pethistory-otel-prometheus-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pethistory-otel-prometheus-role
+subjects:
+  - kind: ServiceAccount
+    name: pethistory-sa
+    namespace: petadoptions
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-awseksresourcedetector-role
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aws-auth
+      - cluster-info
+    resources:
+      - configmaps
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-awseksresourcedetector-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-awseksresourcedetector-role
+subjects:
+  - kind: ServiceAccount
+    name: pethistory-sa
+    namespace: petadoptions
