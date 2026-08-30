@@ -1,3 +1,19 @@
+# ⚠️ 双源警告 —— 本文件与 CDK 描述同一批对象
+#
+# 线上这些 Deployment/Service **同时**带 CDK 的 aws.cdk.eks/prune-* label
+# 和 kubectl 的 last-applied-configuration 注解，说明两条路径都写过它们：
+#   路径 A（CDK）：cdk/pet_stack/lib/services-eks.ts 与
+#                  cdk/pet_stack/resources/k8s_petsite/deployment.yaml
+#   路径 B（本目录）：../deploy-k8s.sh 会 kubectl apply 这些文件
+# **谁最后跑谁生效。** 所以改 CPU/replicas 这类字段时两边必须同步改，
+# 否则一次 cdk deploy 或一次 deploy-k8s.sh 就会把另一边的值覆盖掉。
+#
+# 2026-08-30 实测到的三个真实后果（都是只改一边造成的）：
+#   · CDK 声明 search-service 128m，线上是 256m/512m —— CDK 那次 reduce 从未部署
+#   · CDK 的 petsite manifest 没有 resources 段，导致 petsite-hpa 失效 155 天
+#   · 本文件曾带一个 2026-08-29 已撤回的 aws-otel-collector sidecar，
+#     跑一次 deploy-k8s.sh 就会把它重新加回入口服务
+#
 # Search Service - Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -60,7 +76,7 @@ spec:
           periodSeconds: 5
         resources:
           requests:
-            cpu: "128m"
+            cpu: "256m"
             memory: "512Mi"
           limits:
             cpu: "512m"
