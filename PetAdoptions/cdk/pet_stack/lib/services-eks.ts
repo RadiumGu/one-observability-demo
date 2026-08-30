@@ -630,9 +630,17 @@ def handler(event, context):
     // ============================================================
 
     // PayForAdoption service - EKS deployment
+    //
+    // request 32m / limit 512m —— 实测右调（2026-08-30，压测中 metrics-server
+    // 5 分钟 40 样本）：pod 级 p50 3m / p90 5m / p99 6m。
+    // 原先 request 与 limit 同为 128m，相对实际用量虚高约 21 倍，
+    // 而节点是按 request 预留的，这部分虚高直接变成不可用容量。
+    // 32m 是刻意设的下限（低于此调度粒度失去意义），仍是 p99 的 5 倍余量；
+    // HPA 阈值 60%×(32+32)=38m ≈ p99 的 6.4 倍，不会误触发。
     const payForAdoptionService = new PayForAdoptionServiceEks(this, 'pay-for-adoption', {
       cluster: cluster,
-      cpu: '128m',
+      cpu: '32m',
+      cpuLimit: '512m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
@@ -646,9 +654,15 @@ def handler(event, context):
     payForAdoptionService.node.addDependency(waitForLBControllerReady);
 
     // ListAdoptions service - EKS deployment
+    //
+    // request 48m / limit 512m —— 实测右调（同上窗口）：pod 级
+    // p50 5m / p90 13m / p99 16m。它是三者中用量最高的（search 的最大调用方），
+    // 所以 request 取 3×p99 而不是踩下限。
+    // HPA 阈值 60%×(48+32)=48m = p99 的 3 倍，有响应能力又不会抖。
     const listAdoptionsService = new ListAdoptionsServiceEks(this, 'list-adoptions', {
       cluster: cluster,
-      cpu: '128m',
+      cpu: '48m',
+      cpuLimit: '512m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
@@ -661,9 +675,25 @@ def handler(event, context):
     listAdoptionsService.node.addDependency(waitForLBControllerReady);
 
     // Search service - EKS deployment
+    //
+    // request 与 limit 刻意不同 —— 见 EksServiceProps.cpuLimit 的说明。
+    // 这两个值是 2026-08-29/30 实测后写回的线上现状，不是估算：
+    //   · request 256m：metrics-server 5 分钟 40 样本，p50 16m / p90 47m / p99 73m。
+    //     原先 512m 让全集群没有一个节点放得下这个 Pod（需 512+32=544m，
+    //     最宽裕的节点只剩 537m），两个副本被挤在同一个 AZ、
+    //     拓扑感知路由因此把流量确定性钉在单个 Pod 上（76/24）。
+    //     降到 256m 后 1a 装得下，2 副本跨 AZ，拓扑提示才真正生效。
+    //   · limit 512m：压测下瞬时打到过 520m。若跟 request 一起降到 256m
+    //     甚至 CDK 原本声明的 128m，会被硬节流。
+    //
+    // ⚠️ 配套改动在 CDK 之外：search-service-hpa 的 averageUtilization
+    //    已从 60% 等比提到 120%（120%×256m = 307m = 原先 60%×512m），
+    //    保证绝对扩容阈值不变。HPA 由 PetAdoptions/k8s-manifests/08-hpa.yaml
+    //    管理而非本 stack —— 改这里的 cpu 时必须同步改那个文件。
     const searchService = new SearchServiceEks(this, 'search-service', {
       cluster: cluster,
-      cpu: '128m',
+      cpu: '256m',
+      cpuLimit: '512m',
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',

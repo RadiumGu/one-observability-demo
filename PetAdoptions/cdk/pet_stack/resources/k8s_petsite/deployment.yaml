@@ -60,9 +60,35 @@ spec:
         ports:
         - containerPort: 8080
           protocol: TCP
+        # CPU/内存 request 与 limit。
+        #
+        # 这里原先**完全没有 resources 段**，后果不只是「调度器少一个提示」：
+        #   · petsite-hpa 的 averageUtilization 是相对 request 的百分比，
+        #     没有 request 就算不出利用率 —— 实测 `cpu: <unknown>/60%`，
+        #     这个 HPA 已经失效 155 天，从未扩缩过一次。
+        #   · 无 request 的 Pod 在调度打分和节点压力驱逐排序里都处于最不利位置，
+        #     而 petsite 是入口服务、爆炸半径最大。
+        #
+        # 200m 的依据（2026-08-30 压测中 metrics-server 5 分钟 40 样本）：
+        # pod 级 p50 34m / p90 50m / p99 69m —— 它是全命名空间用量最高的服务。
+        # 取 ~3×p99，使 HPA 阈值 60%×200m=120m 落在 p99 的 1.74 倍处：
+        # 既能在负载真正上来时扩容，又不会被日常波动误触发。
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "512m"
+            memory: "1Gi"
         env:
+        # ⚠️ 必须是 default 命名空间。xray-service 是 default 下的 headless
+        # Service（UDP 2000），petadoptions 里**没有**这个 Service。
+        # 这里曾写成 xray-service.petadoptions:2000，导致 segment 一直发往
+        # 一个不存在的地址 —— 症状是 petsite 在 X-Ray 服务图里完全不出现，
+        # 2026-08-29 定位并改为 .default 后入口边立刻出现。
+        # 对照：pethistory 用的一直是正确的 xray-service.default:2000。
         - name: AWS_XRAY_DAEMON_ADDRESS
-          value: xray-service.petadoptions:2000
+          value: xray-service.default:2000
         - name: ASPNETCORE_URLS
           value: "http://+:8080"
 ---
