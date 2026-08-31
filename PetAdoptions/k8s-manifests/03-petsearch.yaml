@@ -62,18 +62,39 @@ spec:
           value: "<AWS_REGION>"
         - name: JAVA_TOOL_OPTIONS
           value: "-javaagent:/app/aws-opentelemetry-agent.jar -XX:+PreserveFramePointer"
+        # ⚠️ 与 CDK 双源：这三个探针同时由
+        #    cdk/pet_stack/lib/services/eks-service.ts 生成（参数从
+        #    lib/services-eks.ts 的 SearchServiceEks 传入：
+        #    startupGraceSeconds: 150 / probeTimeoutSeconds: 5）。
+        #    谁最后跑谁生效，改一边必须改另一边。
+        #
+        # startupProbe 存在的理由：应用实测 `Started Application in 31.091 seconds`，
+        # 而原先 livenessProbe.initialDelaySeconds 是 30 —— 首次 liveness 恰好在
+        # 应用起来之前打，HPA 扩容造成 CPU 争抢时必然进重启循环。
+        # startupProbe 成功前 liveness 与 readiness 都不执行，于是
+        # 「启动慢」与「运行中卡死」终于用两组独立参数表达。
+        startupProbe:
+          httpGet:
+            path: /health/status
+            port: 80
+          periodSeconds: 5
+          failureThreshold: 30      # 5s × 30 = 150s 启动宽限（实测启动时间约 5 倍）
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /health/status
             port: 80
-          initialDelaySeconds: 30
+          initialDelaySeconds: 0    # 有 startupProbe 后此值多余，不再各自猜启动时间
           periodSeconds: 10
+          timeoutSeconds: 5         # JVM 的 GC 停顿在 1s（K8s 默认）下会被误杀
+          failureThreshold: 3       # 10s × 3 = 30s 内发现真正的卡死
         readinessProbe:
           httpGet:
             path: /health/status
             port: 80
           initialDelaySeconds: 5
           periodSeconds: 5
+          timeoutSeconds: 5
         resources:
           requests:
             cpu: "256m"

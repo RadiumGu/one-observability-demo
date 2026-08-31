@@ -29,6 +29,25 @@ export interface EksServiceProps {
   port?: number;
   containerPort?: number;  // If different from service port (e.g., petsite: service=80, container=8080)
   healthCheck?: string;
+  /**
+   * 启动宽限期（秒）。设置后生成 `startupProbe`，并让 liveness 在启动期完全让位。
+   *
+   * 为什么需要它：liveness 的 `initialDelaySeconds` 是一个**猜死的常数**，
+   * 而 JVM 启动时间随节点 CPU 争抢浮动。search-service 实测
+   * `Started Application in 31.091 seconds`，而共用的默认值是 30 秒 ——
+   * 首次 liveness 恰好在应用起来之前打，HPA 扩容造成 CPU 争抢时必然进重启循环
+   * （2026-08-30 实测：新起的干净 Pod 也中招，与任何注入手段无关）。
+   *
+   * startupProbe 是 K8s 为这件事提供的正解：它成功之前 liveness 与 readiness
+   * 都不会执行，所以「启动慢」与「运行中卡死」这两件事终于用两组独立参数表达，
+   * 不再靠一个常数同时兼顾。省略时不生成 startupProbe，行为与改动前完全一致。
+   */
+  startupGraceSeconds?: number;
+  /**
+   * liveness / readiness 的 `timeoutSeconds`。省略时回落到 1（K8s 默认值，
+   * 也是改动前的隐含值）。JVM 在 GC 停顿期间 1 秒极易超时，属误杀。
+   */
+  probeTimeoutSeconds?: number;
   serviceType?: 'ClusterIP' | 'LoadBalancer';
   region: string;
   instrumentation?: string;
@@ -95,13 +114,31 @@ export abstract class EksService extends Construct {
         },
       },
       ...(props.healthCheck && {
+        // startupProbe 只在显式给了 startupGraceSeconds 时生成 ——
+        // 另外三个 EKS 服务是 Go / .NET、亚秒级启动，不需要，也就零影响。
+        ...(props.startupGraceSeconds && {
+          startupProbe: {
+            httpGet: {
+              path: props.healthCheck,
+              port: containerPort,
+            },
+            // 每 5 秒探一次，最多 ceil(grace/5) 次失败 —— 即最长容忍
+            // startupGraceSeconds 的启动时间，超过才判定真的起不来并重启。
+            periodSeconds: 5,
+            failureThreshold: Math.ceil(props.startupGraceSeconds / 5),
+            timeoutSeconds: props.probeTimeoutSeconds ?? 1,
+          },
+        }),
         livenessProbe: {
           httpGet: {
             path: props.healthCheck,
             port: containerPort,
           },
-          initialDelaySeconds: 30,
+          // 有 startupProbe 时 initialDelaySeconds 是多余的（liveness 在
+          // startupProbe 成功前根本不执行），设 0 免得两处各自猜一个启动时间。
+          initialDelaySeconds: props.startupGraceSeconds ? 0 : 30,
           periodSeconds: 10,
+          timeoutSeconds: props.probeTimeoutSeconds ?? 1,
         },
         readinessProbe: {
           httpGet: {
@@ -110,6 +147,7 @@ export abstract class EksService extends Construct {
           },
           initialDelaySeconds: 5,
           periodSeconds: 5,
+          timeoutSeconds: props.probeTimeoutSeconds ?? 1,
         },
       }),
     }];

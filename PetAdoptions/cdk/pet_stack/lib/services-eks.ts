@@ -729,6 +729,16 @@ def handler(event, context):
       memory: '1Gi',
       replicas: 2,
       healthCheck: '/health/status',
+      // 只有 search-service 需要这两个 —— 它是本 stack 里唯一的 JVM 服务。
+      // 实测日志 `Started Application in 31.091 seconds`，而共用的
+      // livenessProbe.initialDelaySeconds 默认 30 秒：首次 liveness 恰好在
+      // 应用起来之前打，HPA 扩容造成 CPU 争抢时必然进重启循环。
+      // 150 秒宽限 = 实测启动时间的约 5 倍，覆盖冷启动 + CPU 争抢的最坏情况；
+      // 真起不来时仍会在 150 秒后重启，不会无限挂着。
+      startupGraceSeconds: 150,
+      // JVM 在 GC 停顿期间 1 秒（K8s 默认）极易超时被误杀，放到 5 秒。
+      // liveness 仍是 periodSeconds 10 × failureThreshold 3 = 30 秒内发现真卡死。
+      probeTimeoutSeconds: 5,
       instrumentation: 'otel',
       region: region,
       serviceType: 'ClusterIP',
