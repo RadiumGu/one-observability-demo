@@ -91,6 +91,50 @@ spec:
           value: xray-service.default:2000
         - name: ASPNETCORE_URLS
           value: "http://+:8080"
+
+        # ══════════════════════════════════════════════════════════════════
+        # 上游新配置契约要求的 9 个**必需**环境变量。
+        #
+        # ⚠️ 缺任何一个都会让应用启动即抛：
+        #     System.InvalidOperationException:
+        #       Parameter name environment variable 'XXX_PARAM_NAME' is not set or is empty.
+        #   （见 Configuration/ParameterNames.cs 第 36 行的硬抛）
+        #   2026-09-04 18:00 部署新镜像后全站 502，就是因为这 9 个一个都没设。
+        #
+        # ⚠️ 这些变量存的是**参数的短名**，不是参数值本身 ——
+        #   ParameterRefreshManager.GetParameterAsync 会拼成 `{prefix}/{短名}`
+        #   （第 52 行），prefix 来自 PARAMETER_STORE_PREFIX，默认 /petstore。
+        #   所以填 `searchapiurl` 而不是 `/petstore/searchapiurl`，也不是 URL 本身。
+        # ══════════════════════════════════════════════════════════════════
+        - name: PARAMETER_STORE_PREFIX
+          value: "/petstore"
+        - name: SEARCH_API_URL_PARAM_NAME
+          value: "searchapiurl"
+        - name: PET_LIST_ADOPTIONS_URL_PARAM_NAME
+          value: "petlistadoptionsurl"
+        - name: PAYMENT_API_URL_PARAM_NAME
+          value: "paymentapiurl"
+        - name: PET_HISTORY_URL_PARAM_NAME
+          value: "pethistoryurl"
+        - name: CLEANUP_ADOPTIONS_URL_PARAM_NAME
+          value: "cleanupadoptionsurl"
+        - name: RUM_SCRIPT_PARAMETER_NAME
+          value: "rumscript"
+        # agent 集成入口：petsite 靠这个参数拿到 orchestrator 的 runtime ARN。
+        # 该参数由 WaggleAIAgents 栈创建（/petstore/agent/waggleairuntimearn），
+        # 注意它**带完整路径**，因为不在 /petstore 前缀下 ——
+        # GetParameterAsync 对以 / 开头的名字会直接用、不再拼前缀（第 52 行）。
+        - name: WAGGLE_AI_RUNTIME_ARN_PARAM_NAME
+          value: "/petstore/agent/waggleairuntimearn"
+        # ⏸ petfood 的两个参数：服务尚未部署到 EKS，参数还不存在。
+        #   这里仍然**必须设**（否则启动即抛），指向将来会建的短名；
+        #   参数不存在时抛的是另一个异常（"Parameter value for ... is not found"），
+        #   而那发生在**按请求读取**时而非启动时 ——
+        #   所以食品相关页面会 500，其余页面正常。petfood 部署后自动恢复。
+        - name: FOOD_API_URL_PARAM_NAME
+          value: "petfoodapiurl"
+        - name: CART_API_URL_PARAM_NAME
+          value: "petfoodcarturl"
 ---
 apiVersion: elbv2.k8s.aws/v1beta1
 kind: TargetGroupBinding
