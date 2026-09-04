@@ -22,6 +22,7 @@ import {
     SubnetSelection,
     Vpc,
 } from 'aws-cdk-lib/aws-ec2';
+import { PrincipalWithConditions, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 
 import {
@@ -106,7 +107,11 @@ export class WaggleAIAgents extends Stack {
         // 而且没法单独收回 agent 的访问权。独立 SG 让「谁能访问 ALB」这件事可审计。
         const agentSg = new SecurityGroup(this, 'AgentRuntimeSg', {
             vpc,
-            description: 'WaggleAI AgentCore runtime ENIs — egress to internal ALB and AWS APIs',
+            // ⚠️ 必须是纯 ASCII：EC2 的 GroupDescription 不接受非 ASCII 字符
+            //    （API 直接返回 "Character sets beyond ASCII are not supported"）。
+            //    我第一次在这里写了破折号 U+2014，部署直接失败并让整个栈回滚。
+            //    注释里写中文没问题，但**任何进 AWS API 的字符串都要用 ASCII**。
+            description: 'WaggleAI AgentCore runtime ENIs - egress to internal ALB and AWS APIs',
             allowAllOutbound: true,
         });
 
@@ -128,6 +133,12 @@ export class WaggleAIAgents extends Stack {
         //   · ALB 仍是 `scheme=internal`，**没有新增任何公网入口**，符合硬约束。
         //   · 不手工 `aws ec2 authorize-security-group-ingress` —— 该 ALB 已有 6 个悬空
         //     CFN 物理 ID，手工改只会加深漂移。
+        // ⚠️ SG **规则**描述的字符集比 GroupDescription 更严，只允许：
+        //      a-zA-Z0-9. _-:/()#,@[]+=&;{}!$*
+        //    注意 **没有 `>`** —— 我一开始写 "runtimes -> internal ALB" 就因为这个箭头
+        //    被拒（报 "Invalid rule description"），四条规则全部 CREATE_FAILED、整栈回滚。
+        //    这与上面 GroupDescription 的 ASCII 限制是**两条不同的规则**，
+        //    只把非 ASCII 改掉并不够。用 "to" 和 "port" 这类纯字母词最省事。
         for (const port of EXISTING_INTERNAL_ALB_PORTS) {
             new CfnSecurityGroupIngress(this, `InternalAlbIngress${port}`, {
                 groupId: AGENT_VPC_CONFIG.internalAlbSecurityGroupId,
@@ -135,7 +146,7 @@ export class WaggleAIAgents extends Stack {
                 fromPort: port,
                 toPort: port,
                 sourceSecurityGroupId: agentSg.securityGroupId,
-                description: `WaggleAI agent runtimes -> internal ALB :${port}`,
+                description: `WaggleAI agent runtimes to internal ALB port ${port}`,
             });
         }
 
@@ -202,7 +213,7 @@ export class WaggleAIAgents extends Stack {
                 fromPort: backend.listenerPort,
                 toPort: backend.listenerPort,
                 sourceSecurityGroupId: agentSg.securityGroupId,
-                description: `WaggleAI agent runtimes -> internal ALB :${backend.listenerPort} (${backend.name})`,
+                description: `WaggleAI agent runtimes to internal ALB port ${backend.listenerPort} for ${backend.name}`,
             });
 
             new CfnOutput(this, `TargetGroupArn-${backend.name}`, {
@@ -231,8 +242,50 @@ export class WaggleAIAgents extends Stack {
         }
 
         // ── 五个 AgentCore Runtime ─────────────────────────────────────────
-        const gatewayTargets: AgentGatewayTarget[] = [];
+        //
+        // ⚠️ **两阶段部署**，由 context `skip_agent_runtimes` 控制。
+        //
+        // 为什么必须分两阶段：Runtime 的 containerUri 是 `<repo>:latest`，
+        // 而首次部署时 ECR 仓库刚建好、**里面是空的** ——
+        // AgentCore 创建 Runtime 时拉不到镜像会失败，
+        // 且失败发生在 CFN 创建中途，会让整个栈进入 ROLLBACK，连仓库一起回滚，
+        // 于是「建仓库 -> 推镜像」这条路永远走不通，形成死锁。
+        //
+        // 正确顺序：
+        //   ① cdk deploy WaggleAIAgents -c skip_agent_runtimes=true
+        //      -> 建 5 个 ECR 仓库 + ALB listener/目标组 + SSM 参数（不建 Runtime/Gateway）
+        //   ② 在构建机上 docker push 五个 arm64 镜像的 :latest
+        //   ③ cdk deploy WaggleAIAgents        （不带该 context）
+        //      -> 建 5 个 Runtime + Gateway + Memory + KB + Guardrail + AutoReload
+        //
+        // Gateway 也一并跳过 —— 它的 target 就是 Runtime 的 ARN，没有 Runtime 无从建立。
+        const skipRuntimes = this.node.tryGetContext('skip_agent_runtimes') === 'true';
+
+        // 五个执行角色**在两个阶段都创建** —— 这是为了确定性避开 IAM 传播竞态。
+        // 阶段① 建角色（此时不建 runtime），到阶段③ 时它们已经存在好一段时间，
+        // AgentCore 的 CreateAgentRuntime 去校验信任策略时不会再扑空。
+        // 实测：把角色和 runtime 放在同一次部署里，第一个 runtime 必然报
+        // "Role validation failed"，其余 4 个能进 CREATING —— 典型的时序问题。
+        const agentRoles = new Map<string, Role>();
         for (const agent of WAGGLE_AI_AGENT_RUNTIMES) {
+            agentRoles.set(
+                agent.runtimeName,
+                new Role(this, `Role-${agent.runtimeName}`, {
+                    assumedBy: new PrincipalWithConditions(
+                        new ServicePrincipal('bedrock-agentcore.amazonaws.com'),
+                        {
+                            StringEquals: { 'aws:SourceAccount': Stack.of(this).account },
+                            ArnLike: {
+                                'aws:SourceArn': `arn:aws:bedrock-agentcore:${Stack.of(this).region}:${Stack.of(this).account}:*`,
+                            },
+                        },
+                    ),
+                }),
+            );
+        }
+
+        const gatewayTargets: AgentGatewayTarget[] = [];
+        for (const agent of skipRuntimes ? [] : WAGGLE_AI_AGENT_RUNTIMES) {
             const repo = repos.get(agent.runtimeName)!;
             const runtime = new AgentRuntimeConstruct(this, agent.runtimeName, {
                 runtimeName: agent.runtimeName,
@@ -253,6 +306,7 @@ export class WaggleAIAgents extends Stack {
                     ...agent.env,
                 },
                 ssmArnParameterName: agent.ssmArnParameterName,
+                role: agentRoles.get(agent.runtimeName),
             });
             // runtime 必须等仓库存在（否则创建时拉不到 :latest）
             runtime.node.addDependency(repo);
@@ -264,6 +318,13 @@ export class WaggleAIAgents extends Stack {
         }
 
         // ── Gateway / Memory / KB / Guardrail 各一份，五个 agent 共用 ───────
+        // Memory / KB / Guardrail 不依赖 Runtime，本可在阶段 ① 就建；
+        // 但把它们和 Gateway 放同一个条件里，能让阶段 ① 的产物严格限定为
+        // 「推镜像所必需的最小集合」，阶段 ① 失败时要回滚的东西也最少。
+        if (skipRuntimes) {
+            return;
+        }
+
         new WaggleAIGateway(this, 'WaggleAIGateway', {
             targets: gatewayTargets,
             ssmGatewayUrlParameterName: 'waggleaigatewayurl',

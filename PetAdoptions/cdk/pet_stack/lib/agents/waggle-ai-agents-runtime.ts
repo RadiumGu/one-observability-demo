@@ -9,7 +9,7 @@ SPDX-License-Identifier: Apache-2.0
  * @packageDocumentation
  */
 import { CfnOutput, Stack } from 'aws-cdk-lib';
-import { PolicyStatement, Role, ServicePrincipal, Effect, PrincipalWithConditions, Policy } from 'aws-cdk-lib/aws-iam';
+import { PolicyStatement, Role, ServicePrincipal, Effect, PrincipalWithConditions, Policy, IRole } from 'aws-cdk-lib/aws-iam';
 import { CfnRuntime } from 'aws-cdk-lib/aws-bedrockagentcore';
 import { Construct } from 'constructs';
 import { AGENT_RUNTIME_ENV } from './agent-config';
@@ -43,6 +43,18 @@ export interface AgentRuntimeProperties {
     readonly ssmArnParameterName?: string;
     /** app:name tag (defaults to the runtime name). */
     readonly appName?: string;
+    /**
+     * 可选：外部传入的执行角色。
+     *
+     * ⚠️ 本地新增的逃生口，用来绕开一个**实测到的 IAM 传播竞态**：
+     *    角色在同一次 CFN 部署里刚创建，AgentCore 的 CreateAgentRuntime 立刻去校验它，
+     *    结果报 "Role validation failed ... verify that the role exists and its trust
+     *    policy allows assumption by this service"。
+     *    实测 5 个 runtime 里只有**第一个**失败、其余 4 个都进了 CREATING，
+     *    说明信任策略本身正确，纯粹是时序问题。
+     *    传入一个在**上一次部署**里就建好的角色即可确定性地避开。
+     */
+    readonly role?: IRole;
 }
 
 /** A Bedrock AgentCore Runtime for one Waggle AI agent (orchestrator or sub-agent). */
@@ -52,7 +64,7 @@ export class AgentRuntimeConstruct extends Construct {
     constructor(scope: Construct, id: string, properties: AgentRuntimeProperties) {
         super(scope, id);
 
-        const agentRuntimeRole = new Role(this, 'AgentRuntimeRole', {
+        const agentRuntimeRole = properties.role ?? new Role(this, 'AgentRuntimeRole', {
             assumedBy: new PrincipalWithConditions(new ServicePrincipal('bedrock-agentcore.amazonaws.com'), {
                 StringEquals: { 'aws:SourceAccount': Stack.of(this).account },
                 ArnLike: {
