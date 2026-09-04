@@ -799,6 +799,52 @@ def handler(event, context):
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
+    // ⚠️ 这两个 GSI **必须在 CDK 里声明**，理由有两层，第二层很隐蔽：
+    //
+    //  ① 应用真的会查它们。`food_repository.rs` 第 663/701 行分别对
+    //     `PetTypeIndex` 和 `FoodTypeIndex` 发 Query。
+    //     应用自带 `table_manager.rs` 也能建（就是 /api/admin/setup-tables 端点），
+    //     但那是「应用建基础设施」的 split-brain：CDK 建表、应用建索引，
+    //     谁都不掌握完整状态。实测表上 GlobalSecondaryIndexes 为 **null** ——
+    //     那个 admin 端点从没被调用过，索引压根不存在。
+    //
+    //  ② **CDK 的 grantReadWriteData 只在表「已声明索引」时才授权 /index/*。**
+    //     Table.grant() 内部是 `this.hasIndex ? [tableArn, tableArn + '/index/*'] : [tableArn]`，
+    //     而 hasIndex 仅由 CDK 自己知道的索引置真。
+    //     所以就算索引在运行时被应用建出来，IAM 也仍然拒绝：
+    //       not authorized to perform: dynamodb:Query on resource:
+    //         .../table/ServicesEks2-ddbpetfoodfoods.../index/PetTypeIndex
+    //     实际策略里只有裸 table ARN，没有 /index/*。
+    //
+    //     在这里声明索引让 hasIndex 转真，petfood-service-eks.ts 第 41 行那句
+    //     grantReadWriteData **自动**覆盖 /index/*，不需要再手写 addToPolicy。
+    //     一处声明同时修掉「索引不存在」和「索引无权限」两个问题。
+    //
+    // 键与投影逐字对齐 table_manager.rs 第 83-111 行，避免应用与基础设施不一致。
+    petfoodFoodsTable.addGlobalSecondaryIndex({
+      indexName: 'PetTypeIndex',
+      partitionKey: { name: 'pet_type', type: ddb.AttributeType.STRING },
+      sortKey: { name: 'name', type: ddb.AttributeType.STRING },
+      projectionType: ddb.ProjectionType.ALL,
+    });
+    // ⚠️ 这两个 GSI 必须**分两次**部署到已存在的表上。DynamoDB 限制：
+    //      "Cannot perform more than one GSI creation or deletion in a single update"
+    //    一起加会让 UPDATE_FAILED 并整栈回滚（已实测，栈干净回滚未损表）。
+    //    该限制**只作用于 UPDATE** —— 全新建表时两个一起声明合法，
+    //    所以这里保留两个，新环境从零部署一次到位。
+    //    若将来再往这张**已存在**的表加索引，仍需一次一个。
+    //    第一个 GSI 落地后 hasIndex 即为真，IAM 的 /index/* 授权同时生效（已实测）。
+    petfoodFoodsTable.addGlobalSecondaryIndex({
+      indexName: 'FoodTypeIndex',
+      partitionKey: { name: 'food_type', type: ddb.AttributeType.STRING },
+      // ⚠️ 排序键是 `price` 且类型是 **NUMBER**，不是 `name`/STRING。
+      //    我一开始按 PetTypeIndex 的模式推断成 name，核对 table_manager.rs
+      //    第 113-118 行才发现不一样（price / KeyType::Range / ScalarAttributeType::N）。
+      //    GSI 键写错部署时不报错，但运行时 Query 失败，且改键需删了重建索引。
+      sortKey: { name: 'price', type: ddb.AttributeType.NUMBER },
+      projectionType: ddb.ProjectionType.ALL,
+    });
+
     // 购物车表。partition key 用 `user_id`，sort key 用 `item_id` ——
     // 一个用户的购物车是多条 item，按 user_id 查询整车、按复合键定位单项。
     const petfoodCartsTable = new ddb.Table(this, 'ddb_petfood_carts', {
@@ -833,7 +879,16 @@ def handler(event, context):
       // 与 petsite 同形（见 eks-service.ts 里 containerPort 的注释）。
       port: 80,
       containerPort: 8080,
-      healthCheck: '/health',
+      // ⚠️ 必须是 `/health/status`，不是 `/health`。
+      //    petfood 的 main.rs 第 228 行注册的是 `.route("/health/status", get(health_check))`，
+      //    `/health` 本身**没有**路由，请求它返回 404。
+      //    我原来写 `/health`，结果 kubelet 的 readiness/liveness 探针一直拿到 404：
+      //      Liveness probe failed: HTTP probe failed with statuscode: 404
+      //    而**应用其实完全健康**（配置全部解析成功、在正常处理请求）——
+      //    Deployment 却停在 Available=False / MinimumReplicasUnavailable，
+      //    滚动更新卡住、新旧 Pod 并存。
+      //    上面三个服务（第 680/727/758 行）都用的 `/health/status`，只有这里写错了。
+      healthCheck: '/health/status',
       instrumentation: 'otel',
       region: region,
       // ⚠️ ClusterIP —— 硬约束「ALB 上不得新增公网入口」。
@@ -845,7 +900,24 @@ def handler(event, context):
         PETFOOD_FOODS_TABLE_NAME: petfoodFoodsTable.tableName,
         PETFOOD_CARTS_TABLE_NAME: petfoodCartsTable.tableName,
         PETFOOD_EVENT_BUS_NAME: petfoodEventBus.eventBusName,
-        PETFOOD_PARAM_PREFIX: '/petstore',
+        // ⚠️ 刻意**不设** PETFOOD_PARAM_PREFIX。
+        //
+        //    petfood 的 `resolve_parameter_with_prefix`（src/config/mod.rs）有两条路：
+        //      · prefix **非空** → 把上面那些 env 的**值当成 SSM 参数名**，
+        //        去查 `{prefix}/{值}`，查不到就**返回空串**（不是回落到 env 值！）
+        //      · prefix **为空** → 直接把 env 的值当结果用
+        //
+        //    我原来设了 `/petstore` 却又把**表名本身**塞进 env，于是它去查
+        //      /petstore/ServicesEks2-ddbpetfoodfoods00C5D62B-4FH25BBOAEWX
+        //    这个不存在的参数，拿到空串，最后死在
+        //      Error: ValidationError { message: "Foods table name cannot be empty" }
+        //
+        //    两种修法都可行：建一堆 SSM 参数存表名、或者不要这层间接。
+        //    选后者 —— 表名由 CDK 在同一个栈里创建，`table.tableName` 就是权威值，
+        //    绕一趟 SSM 只是多一个可能不同步的副本和一次运行时依赖。
+        //
+        //    注意这**不影响** agent 侧：agent 读的是 `/petstore/agent/petfoodapiurl`
+        //    那种「服务地址」参数，与这里的「表名」是两回事。
         PETFOOD_REGION: region,
         // 结构化日志 —— 让 CloudWatch Logs Insights 能按字段查询而非正则抠文本
         PETFOOD_ENABLE_JSON_LOGGING: 'true',

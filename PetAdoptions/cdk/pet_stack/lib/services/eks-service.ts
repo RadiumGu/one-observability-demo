@@ -229,6 +229,29 @@ export abstract class EksService extends Construct {
             },
             spec: {
               serviceAccountName: this.serviceAccount.serviceAccountName,
+              // ⚠️ 关掉 Kubernetes 的 Service 环境变量自动注入。
+              //
+              //    K8s 默认会为命名空间里**每个** Service 往 Pod 里注入三个变量：
+              //      <NAME>_PORT=tcp://<clusterIP>:<port>
+              //      <NAME>_SERVICE_HOST=<clusterIP>
+              //      <NAME>_SERVICE_PORT=<port>
+              //
+              //    这会与「用同名前缀读配置」的应用**直接撞车**。实测（2026-09-04 18:15）：
+              //    petfood 用 `config::Environment::with_prefix("PETFOOD")`，
+              //    于是 K8s 注入的 `PETFOOD_PORT=tcp://10.100.6.148:80` 被映射到
+              //    `ServerConfig.port`（类型 u16），启动即崩：
+              //      Failed to deserialize server config:
+              //        invalid type: string "tcp://10.100.6.148:80", expected an integer
+              //    而 Pod 仍显示 Running/ready ——「Pod Ready ≠ 应用可用」的又一例。
+              //
+              //    这些变量是 Docker 时代的遗留兼容机制，本项目所有服务都用
+              //    DNS（`<svc>.<ns>.svc.cluster.local`）或 SSM 参数寻址，
+              //    没有任何一个依赖它们，关掉是纯收益。
+              //
+              //    对全部服务统一关闭而不是只关 petfood：任何服务只要它的名字
+              //    恰好等于某个应用的配置前缀，就会踩同一个坑，而这种撞车
+              //    **在部署前无法从代码看出来**（取决于同命名空间里有哪些 Service）。
+              enableServiceLinks: false,
               // 多副本时优先跨 AZ + 跨 Node 打散，允许同 AZ 双 replica（t4g.large CPU 紧张时兼容）
               // ScheduleAnyway: scheduler 尽力均衡但不会阻止调度
               ...(props.replicas >= 2 && {

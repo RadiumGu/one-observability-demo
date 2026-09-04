@@ -56,9 +56,10 @@ const ALB_SUFFIX = 'b651f61f074cbbfe';
  * 每个后端都要在集群里配一个 TargetGroupBinding 才会有目标 ——
  * 否则 listener 存在但目标组为空，返回 503。
  *
- * petfood 的两个后端（petfoodapiurl / petfoodcarturl）暂不在此 ——
- * 服务本身还没部署到 EKS。缺参数时上游 config.py 返回 ""，
- * 对应 tool 报 "not configured" 而**不崩溃**，所以 ordering agent 可先部分工作。
+ * petfood 已于 2026-09-04 部署到 EKS 并验证可用（9 条食品、PetTypeIndex ACTIVE），
+ * 所以补上 :8084。注意 **petfoodapiurl 与 petfoodcarturl 指向同一个服务**，
+ * 只是路径不同（/api/foods 与 /api/cart），因此只需一个 listener 与一个目标组 ——
+ * 下面用 extraSsm 表达「同一后端导出多个参数」，不要为此建第二个 listener。
  */
 const AGENT_ALB_BACKENDS: Array<{
     name: string;
@@ -68,6 +69,10 @@ const AGENT_ALB_BACKENDS: Array<{
     targetGroupName: string;
     healthCheckPath: string;
     ssmShortName: string;
+    /** 该后端在 SSM 里导出的路径。缺省为 ''（即 listener 根）。 */
+    ssmPath?: string;
+    /** 同一后端要导出的额外参数：短名 → 路径。 */
+    extraSsm?: Array<{ shortName: string; path: string }>;
 }> = [
     {
         name: 'ListAdoptions',
@@ -86,6 +91,19 @@ const AGENT_ALB_BACKENDS: Array<{
         targetGroupName: 'petsite-lt-payadopt-tg',
         healthCheckPath: '/health/status',
         ssmShortName: 'paymentapiurl',
+    },
+    {
+        name: 'PetFood',
+        serviceName: 'petfood',
+        servicePort: 80,
+        listenerPort: 8084,
+        targetGroupName: 'petsite-lt-petfood-tg',
+        // petfood 的健康端点是 /health/status（main.rs 第 228 行），
+        // **不是** /health —— 后者没有路由，探针会拿到 404。
+        healthCheckPath: '/health/status',
+        ssmShortName: 'petfoodapiurl',
+        ssmPath: '/api/foods',
+        extraSsm: [{ shortName: 'petfoodcarturl', path: '/api/cart' }],
     },
 ];
 
@@ -199,11 +217,27 @@ export class WaggleAIAgents extends Stack {
                 defaultActions: [{ type: 'forward', targetGroupArn: tg.ref }],
             });
 
-            // agent 通过这个 SSM 参数拿到后端地址
+            // agent 通过这些 SSM 参数拿到后端地址。
+            //
+            // ⚠️ 参数值必须**含完整 API 路径**，不能只给 host:port。
+            //    petsite 的 UrlHelper.BuildUrl 与 agent 的 tool 都只在给定 URL 之后
+            //    追加路径段与查询串，**不会**自己补 /api/foods。
+            //    我第一次给 petsite 建 /petstore/petfoodapiurl 时只写了主机名，
+            //    结果请求打到根路径 `/` —— petfood 没有 `/` 路由，页面报
+            //      "Response status code does not indicate success: 404 (Not Found)"，
+            //    而服务本身完全健康，排查方向很容易被带偏。
+            const backendBase = `http://${INTERNAL_ALB_DNS}:${backend.listenerPort}`;
+            const ssmEntries = new Map<string, string>([
+                [backend.ssmShortName, `${backendBase}${backend.ssmPath ?? ''}`],
+            ]);
+            for (const extra of backend.extraSsm ?? []) {
+                // 同一后端的额外参数复用同一 listener —— 只有路径不同。
+                ssmEntries.set(extra.shortName, `${backendBase}${extra.path}`);
+            }
             AgentUtils.createSsmParameters(
                 this,
                 AGENT_RUNTIME_ENV.PARAMETER_STORE_PREFIX,
-                new Map([[backend.ssmShortName, `http://${INTERNAL_ALB_DNS}:${backend.listenerPort}`]]),
+                ssmEntries,
             );
 
             // agent 的 ENI 要能连上这个新端口

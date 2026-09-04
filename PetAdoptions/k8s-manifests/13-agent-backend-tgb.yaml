@@ -49,3 +49,22 @@ spec:
     port: 80
   targetGroupARN: REPLACE_ME_PAYADOPT_TG_ARN
   targetType: ip
+---
+# petfood（:8084）。ordering agent 的 tool 需要它。
+# 一个 TGB 同时服务 petfoodapiurl 与 petfoodcarturl ——
+# 那两个参数指向**同一个服务**，只是路径不同（/api/foods 与 /api/cart），
+# 所以只有一个 listener、一个目标组、一个 TGB。
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: petfood-agent-tgb
+  namespace: petadoptions
+  labels:
+    purpose: agent-backend
+spec:
+  ipAddressType: ipv4
+  serviceRef:
+    name: petfood
+    port: 80
+  targetGroupARN: REPLACE_ME_PETFOOD_TG_ARN
+  targetType: ip
