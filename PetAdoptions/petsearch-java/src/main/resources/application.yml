@@ -1,10 +1,22 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# ⚠️ 本文件必须逐行合并，绝不可整体取上游 —— 上游改了两个值，任一照抄都会打挂服务：
+#   region: 上游是 eu-west-1。照抄会让所有 AWS 调用打到爱尔兰，
+#           SSM / DynamoDB / S3 全部找不到资源（本环境在 ap-northeast-1）。
+#   port:   上游是 8080。而线上 Deployment 的 containerPort 是 80、Service 是 80->80，
+#           改成 8080 后**探针与 ALB 目标组全部失败** —— Pod 起得来但流量进不去，
+#           比直接崩溃更难诊断。
+# 上游的缩进风格（4 空格）纯属格式差异，不影响语义，此处保留本地 2 空格。
 spring:
   application:
     name: petstore
+
 cloud:
   aws:
     region:
       static: ap-northeast-1
       auto: false
+
 server:
   port: 80
