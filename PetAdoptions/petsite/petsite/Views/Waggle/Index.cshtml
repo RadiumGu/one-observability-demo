@@ -1,0 +1,535 @@
+@{
+    ViewData["Title"] = "Waggle AI Chat";
+}
+
+<section class="pet-hero">
+    <div class="container">
+        <img class="pet-hero-title" src="~/images/main_banner_text.png"/>
+    </div>
+</section>
+
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="chat-container">
+                <div class="chat-header">
+                    <div class="chat-avatar">
+                        <svg class="wg-mark" viewBox="0 0 32 32" aria-hidden="true">
+                            <g fill="currentColor">
+                                <ellipse cx="16" cy="20.6" rx="6.2" ry="5.2" />
+                                <ellipse cx="7.7" cy="13.1" rx="3" ry="3.9" transform="rotate(-20 7.7 13.1)" />
+                                <ellipse cx="24.3" cy="13.1" rx="3" ry="3.9" transform="rotate(20 24.3 13.1)" />
+                                <ellipse cx="12.3" cy="7.3" rx="2.7" ry="3.5" />
+                                <ellipse cx="19.7" cy="7.3" rx="2.7" ry="3.5" />
+                            </g>
+                            <path d="M27.6 2.2l.72 1.98 1.98.72-1.98.72-.72 1.98-.72-1.98-1.98-.72 1.98-.72.72-1.98z"
+                                  fill="#FFE3B0" />
+                        </svg>
+                    </div>
+                    <h4 class="mb-0">Waggle AI</h4>
+                    <div class="online-status"></div>
+                    <button type="button" id="page-minimize" class="wg-icon-btn"
+                            title="Minimize to corner" aria-label="Minimize to corner">&#9662;</button>
+                    <div id="session-id-display" class="session-id-text"></div>
+                </div>
+                <div id="chat-messages" class="chat-messages">
+                    <!-- Initial message will be added by JavaScript -->
+                </div>
+
+                <div class="chat-input-container">
+                    <input type="text" id="message-input" class="chat-input" placeholder="Type your message here..." maxlength="500">
+                    <button id="send-button" class="send-btn" type="button">
+                        <span class="send-icon">➤</span>
+                        <div class="spinner" style="display: none;"></div>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+    .chat-container {
+        background: linear-gradient(135deg, #2d7f83 0%, #19dc91 100%);
+        border-radius: 20px;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.15);
+        overflow: hidden;
+        font-family: 'Nunito Sans', 'Roboto', sans-serif !important;
+    }
+
+    .chat-container * {
+        font-family: 'Nunito Sans', 'Roboto', sans-serif !important;
+    }
+
+    .chat-header {
+        background: #000000;
+        padding: 20px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 15px;
+    }
+
+    .chat-avatar {
+        width: 50px;
+        height: 50px;
+        border-radius: 50%;
+        background: linear-gradient(145deg, #2DD4BF 0%, #0D9488 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #ffffff;
+        font-size: 24px;
+        animation: bounce 2s infinite;
+    }
+
+    .chat-header h4 {
+        color: #19dc91;
+        flex: 1;
+        font-weight: 600;
+    }
+
+    .online-status {
+        width: 12px;
+        height: 12px;
+        background: #0fa828;
+        border-radius: 50%;
+        animation: pulse 2s infinite;
+    }
+
+    .session-id-text {
+        font-size: 11px;
+        color: #999999;
+        font-weight: 400;
+        width: 100%;
+        text-align: right;
+        margin-top: 5px;
+    }
+
+    .chat-messages {
+        height: calc(100vh - 400px);
+        min-height: 500px;
+        max-height: 800px;
+        overflow-y: auto;
+        padding: 20px;
+        background: #ffffff;
+    }
+
+    @@media (max-height: 900px) {
+        .chat-messages {
+            height: calc(100vh - 350px);
+            min-height: 400px;
+        }
+    }
+
+    @@media (max-height: 700px) {
+        .chat-messages {
+            height: calc(100vh - 300px);
+            min-height: 300px;
+        }
+    }
+
+    .message {
+        margin-bottom: 15px;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .sender-name {
+        font-weight: 600;
+        color: #2d7f83;
+        font-size: 12px;
+        margin-bottom: 5px;
+    }
+
+    .message-bubble {
+        max-width: 85%;
+        padding: 15px 20px;
+        border-radius: 15px;
+        font-size: 15px;
+        line-height: 1.6;
+        position: relative;
+        font-weight: 400;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+    }
+
+    .message-bubble h3, .message-bubble h4, .message-bubble h5 {
+        margin: 15px 0 8px 0 !important;
+        font-weight: 600 !important;
+        line-height: 1.3 !important;
+    }
+
+    .message-bubble h3 {
+        font-size: 20px !important;
+        color: #2d7f83 !important;
+    }
+
+    .message-bubble h4 {
+        font-size: 18px !important;
+        color: #2d7f83 !important;
+    }
+
+    .message-bubble h5 {
+        font-size: 16px !important;
+        color: #2d7f83 !important;
+    }
+
+    .message-bubble strong {
+        font-weight: 600 !important;
+        color: #2d7f83 !important;
+    }
+
+    .message-bubble em {
+        font-style: italic !important;
+        color: #555 !important;
+    }
+
+    .message-bubble br {
+        line-height: 1.8;
+    }
+
+    .message-bubble div[style*="margin-left: 15px"] {
+        line-height: 1.5;
+        margin-bottom: 5px;
+    }
+
+    .pet-card {
+        display: inline-block;
+        vertical-align: top;
+        margin: 8px 10px 4px 0;
+        padding: 6px;
+        border: 1px solid #e9ecef;
+        border-radius: 12px;
+        background: #ffffff;
+        text-align: center;
+        outline: 3px solid transparent;
+        transition: outline-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .pet-card-selected {
+        outline-color: #dc7406;
+        box-shadow: 0 6px 16px rgba(220,116,6,0.35);
+    }
+
+    .pet-photo {
+        display: block;
+        width: 132px;
+        height: 132px;
+        object-fit: cover;
+        border-radius: 9px;
+        cursor: pointer;
+        transition: transform 0.2s ease;
+    }
+
+    .pet-photo:hover {
+        transform: scale(1.03);
+    }
+
+    .pet-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+    }
+
+    .pet-btn {
+        flex: 1;
+        display: inline-block;
+        padding: 5px 8px;
+        border: none;
+        border-radius: 7px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        text-decoration: none;
+        white-space: nowrap;
+        transition: background 0.2s ease, transform 0.15s ease;
+    }
+
+    .pet-btn:hover {
+        transform: translateY(-1px);
+        text-decoration: none;
+    }
+
+
+    .pet-btn-adopt {
+        background: #dc7406;
+        color: #ffffff;
+    }
+
+    .pet-btn-adopt:hover {
+        background: #0fa828;
+    }
+
+    .pet-btn-buy {
+        background: #2d7f83;
+        color: #ffffff;
+    }
+
+    .pet-btn-buy:hover {
+        background: #0fa828;
+    }
+
+    /* Repeated from waggle-chat.css: this page's own .pet-btn rules would otherwise win on order. */
+    .pet-btn-done {
+        background: #e7f2e9;
+        color: #2f6b3a;
+        cursor: default;
+    }
+
+    .pet-btn-done:hover {
+        transform: none;
+    }
+
+    .timestamp {
+        color: #999999;
+        font-size: 10px;
+        text-align: right;
+        margin-top: 5px;
+        opacity: 0.7;
+    }
+
+    .user-message {
+        align-items: flex-end;
+    }
+
+    .user-message .sender-name {
+        align-self: flex-end;
+        text-align: right;
+    }
+
+    .user-message .message-bubble {
+        background: #2d7f83;
+        color: #ffffff;
+        border-bottom-right-radius: 5px;
+        align-self: flex-end;
+    }
+
+    .user-message .timestamp {
+        color: rgba(255,255,255,0.7);
+    }
+
+    .bot-message .message-bubble {
+        background: #f8f9fa;
+        color: #333333;
+        border: 1px solid #e9ecef;
+        border-bottom-left-radius: 5px;
+        text-align: left;
+    }
+
+    .bot-message .message-bubble p {
+        margin: 8px 0;
+    }
+
+    .bot-message .message-bubble ul, .bot-message .message-bubble ol {
+        margin: 8px 0;
+        padding-left: 20px;
+    }
+
+    .bot-message .message-bubble li {
+        margin: 3px 0;
+    }
+
+    .chat-input-container {
+        padding: 20px;
+        background: rgba(19, 126, 68, 0.67);
+        display: flex;
+        gap: 10px;
+    }
+
+    .chat-input {
+        flex: 1;
+        border: 2px solid #19dc91;
+        border-radius: 25px;
+        padding: 12px 20px;
+        font-size: 14px;
+        background: #ffffff;
+        outline: none;
+        color: #333333;
+        font-family: 'Nunito Sans', 'Roboto', sans-serif !important;
+    }
+
+    .chat-input:focus {
+        border-color: #0fa828;
+        box-shadow: 0 0 0 3px rgba(25, 220, 145, 0.1);
+    }
+
+    .send-btn {
+        width: 50px;
+        height: 50px;
+        border: none;
+        border-radius: 50%;
+        background: #dc7406;
+        color: #ffffff;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .send-btn:hover {
+        background: #0fa828;
+        transform: scale(1.05);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+    }
+
+    .send-icon {
+        font-size: 18px;
+        font-weight: bold;
+    }
+
+    .spinner {
+        width: 20px;
+        height: 20px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top: 2px solid #ffffff;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+
+    @@keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
+    @@keyframes bounce {
+        0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
+        40% { transform: translateY(-10px); }
+        60% { transform: translateY(-5px); }
+    }
+
+    @@keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(78, 205, 196, 0.7); }
+        70% { box-shadow: 0 0 0 10px rgba(78, 205, 196, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(78, 205, 196, 0); }
+    }
+
+    @@keyframes slideInLeft {
+        from { transform: translateX(-100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+
+    @@keyframes slideInRight {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+
+    @@keyframes tailWag {
+        0% { transform: rotate(0deg); }
+        25% { transform: rotate(15deg); }
+        50% { transform: rotate(0deg); }
+        75% { transform: rotate(-15deg); }
+        100% { transform: rotate(0deg); }
+    }
+
+    @@keyframes pawBounce {
+        0%, 100% { transform: translateY(0) scale(1); }
+        50% { transform: translateY(-8px) scale(1.1); }
+    }
+
+    .animate-in {
+        animation: slideInLeft 0.5s ease-out;
+    }
+
+    .animate-in-user {
+        animation: slideInRight 0.5s ease-out;
+    }
+
+    .thinking-message {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: #2d7f83;
+        font-weight: 500;
+        font-size: 15px;
+    }
+
+    .thinking-message .paw {
+        display: inline-block;
+        font-size: 18px;
+        animation: pawBounce 0.6s ease-in-out infinite;
+    }
+
+    .thinking-message .paw:nth-child(2) {
+        animation-delay: 0.15s;
+    }
+
+    .thinking-message .paw:nth-child(3) {
+        animation-delay: 0.3s;
+    }
+
+    .thinking-message .tail {
+        display: inline-block;
+        font-size: 20px;
+        animation: tailWag 1s ease-in-out infinite;
+        transform-origin: center;
+    }
+
+    /* Dark mode. This page redeclares .chat-messages, .message-bubble and the input
+       colours locally, and a page style block beats the shared stylesheet, so the
+       dark variants have to live here too. */
+    [data-theme="dark"] .chat-container {
+        background: linear-gradient(135deg, #0F766E 0%, #0D9488 100%);
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
+
+    [data-theme="dark"] .chat-messages {
+        background: #10151F;
+    }
+
+    [data-theme="dark"] .bot-message .message-bubble {
+        background: #1A2230;
+        color: #ECF1F7;
+        border-color: #263141;
+    }
+
+    [data-theme="dark"] .user-message .message-bubble {
+        background: #0D9488;
+        color: #ffffff;
+    }
+
+    [data-theme="dark"] .message-bubble strong { color: #5EEAD4 !important; }
+    [data-theme="dark"] .message-bubble em { color: #A9BACD !important; }
+    [data-theme="dark"] .sender-name { color: #5EEAD4; }
+    [data-theme="dark"] .timestamp { color: #7D8CA0; }
+
+    [data-theme="dark"] .chat-input-container {
+        background: #0D131C;
+        border-top: 1px solid #263141;
+    }
+
+    [data-theme="dark"] .chat-input {
+        background: #161E2B;
+        color: #ECF1F7;
+        border-color: #2A3949;
+    }
+
+    [data-theme="dark"] .chat-input::placeholder { color: #7D8CA0; }
+    [data-theme="dark"] .session-id-text { color: #7D8CA0; }
+    [data-theme="dark"] .thinking-message { color: #5EEAD4; }
+</style>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    // Chat engine is shared with the widget (wwwroot/js/waggle-chat.js) via the same sessionStorage.
+    var input = document.getElementById('message-input');
+    var chat = window.WaggleChat.create({
+        messagesEl: document.getElementById('chat-messages'),
+        inputEl: input,
+        sendButtonEl: document.getElementById('send-button'),
+        sessionLabelEl: document.getElementById('session-id-display'),
+        userId: '@ViewBag.UserId',
+        welcome: "Hi, I'm **Waggle AI** \ud83d\udc3e I can recommend food, order it, help you adopt a pet, " +
+                 "or answer any pet question. What can I help with?"
+    });
+    chat.restore();
+    input.focus();
+
+    // Collapse into the widget: mark it open and leave; the conversation lives in sessionStorage.
+    document.getElementById('page-minimize').addEventListener('click', function () {
+        try { sessionStorage.setItem(window.WaggleChat.keys.open, '1'); } catch (e) { /* ignore */ }
+        window.location.href = '@Url.Action("Index", "Home", new { userId = ViewBag.UserId })';
+    });
+});
+</script>

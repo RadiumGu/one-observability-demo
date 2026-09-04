@@ -5,58 +5,74 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
 using PetSite.Models;
-using Amazon.XRay.Recorder.Handlers.AwsSdk;
 using System.Net.Http;
-using Amazon.XRay.Recorder.Handlers.System.Net;
-using Amazon.XRay.Recorder.Core;
 using System.Text.Json;
 using PetSite.ViewModels;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Http;
+using PetSite.Helpers;
+using PetSite.Configuration;
 
 namespace PetSite.Controllers
 {
-    public class PetListAdoptionsController : Controller
+    public class PetListAdoptionsController : BaseController
     {
-        private static HttpClient _httpClient;
-        private IConfiguration _configuration;
+        private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IConfiguration _configuration;
+        private readonly ILogger<PetListAdoptionsController> _logger;
+        private readonly ParameterRefreshManager _refreshManager;
 
-        public PetListAdoptionsController(IConfiguration configuration)
+        public PetListAdoptionsController(
+            ILogger<PetListAdoptionsController> logger,
+            IConfiguration configuration,
+            IHttpClientFactory httpClientFactory,
+            ParameterRefreshManager refreshManager)
         {
             _configuration = configuration;
-            AWSSDKHandler.RegisterXRayForAllServices();
-
-            _httpClient = new HttpClient(new HttpClientXRayTracingHandler(new HttpClientHandler()));
+            _httpClientFactory = httpClientFactory;
+            _logger = logger;
+            _refreshManager = refreshManager;
         }
 
         // GET
         public async Task<IActionResult> Index()
         {
-            AWSXRayRecorder.Instance.BeginSubsegment("Calling PetListAdoptions");
-            
-            Console.WriteLine($"[{AWSXRayRecorder.Instance.GetEntity().TraceId}][{AWSXRayRecorder.Instance.TraceContext.GetEntity().RootSegment.TraceId}] - Calling PetListAdoptions API");
+            if (EnsureUserId()) return new EmptyResult();
+            // Add custom span attributes using Activity API
+            var currentActivity = Activity.Current;
+            if (currentActivity != null)
+            {
+                _logger.LogInformation("Calling PetListAdoptions API");
+            }
 
             string result;
-
-            List<Pet> Pets = new List<Pet>();
+            List<AdoptedPet> Pets = new List<AdoptedPet>();
 
             try
             {
-                //string petlistadoptionsurl = _configuration["petlistadoptionsurl"];
-                string petlistadoptionsurl = SystemsManagerConfigurationProviderWithReloadExtensions.GetConfiguration(_configuration,"petlistadoptionsurl");
-                
-        
-                result = await _httpClient.GetStringAsync($"{petlistadoptionsurl}");
-                Pets = JsonSerializer.Deserialize<List<Pet>>(result);
+                // Begin activity span to track PetListAdoptions API call
+                using (var activity = Activity.Current?.Source?.StartActivity($"Calling PetListAdoptions API for user: {ViewBag.UserId?.ToString()}"))
+                {
+                    string petlistadoptionsurl = await ParameterNames.GetParameterValueAsync(ParameterNames.PET_LIST_ADOPTIONS_URL, _refreshManager);
+                    using var httpClient = _httpClientFactory.CreateClient();
+                    var userId = ViewBag.UserId?.ToString();
+                    //var url = UrlHelper.BuildUrl(petlistadoptionsurl, null, ("userId",userId));
+                    _logger.LogInformation($"Calling PetListAdoptions API for user: {userId} at: {petlistadoptionsurl}");
+                    result = await httpClient.GetStringAsync(petlistadoptionsurl);
+                    Pets = JsonSerializer.Deserialize<List<AdoptedPet>>(result);
+                }
+            }
+            catch (HttpRequestException e) when (e.Message.Contains("404"))
+            {
+                _logger.LogWarning("PetListAdoptions API returned 404 - returning empty pets list");
+                Pets = new List<AdoptedPet>();
             }
             catch (Exception e)
             {
-                AWSXRayRecorder.Instance.AddException(e);
-                throw e;
-            }
-            finally
-            {
-                AWSXRayRecorder.Instance.EndSubsegment();
+                _logger.LogError(e, $"Error calling PetListAdoptions API for user {ViewBag.UserId?.ToString()}: {e.Message}");
+                ViewBag.ErrorMessage = $"Unable to load adoption list at this time. Please try again later.\nError message: {e.Message}";
+                return View("Error", new PetSite.Models.ErrorViewModel { RequestId = System.Diagnostics.Activity.Current?.Id ?? HttpContext.TraceIdentifier });
             }
 
             return View(Pets);

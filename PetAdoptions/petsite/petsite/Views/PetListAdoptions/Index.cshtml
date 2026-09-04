@@ -1,4 +1,4 @@
-@model List<Pet>
+@model List<AdoptedPet>
 
 @{
     ViewData["Title"] = "Pet Adoption List";
@@ -10,6 +10,9 @@
     </div>
 </section>
 
+<br>
+
+<h2 class="text-center mb-4" style="color: #006400; font-weight: bold;">Adopted Pet List</h2>
 
 <div class="container">
     @if (Model.Any())
@@ -25,8 +28,10 @@
     }
     else
     {
-        <div class="pet-items row">
-            No adoption data retreived
+        <br>
+        <div class="alert alert-warning" role="alert">
+            <h4 class="alert-heading">No adoption data available!</h4>
+            <p>No adoption data retrieved at this time. Please check back later.</p>
         </div>
     }
 </div>
