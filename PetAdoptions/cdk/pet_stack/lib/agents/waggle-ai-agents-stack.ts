@@ -222,6 +222,22 @@ export class WaggleAIAgents extends Stack {
             });
         }
 
+        // ── searchapiurl：只补参数，不建 listener ──────────────────────────
+        //
+        // agent 的 `_BACKEND_SSM_NAMES` 里 SEARCH_API_URL 对应短名 `searchapiurl`，
+        // 而 search 服务**已经**在 internal ALB 的 :8081 上（既有 listener，
+        // 实测 2 个目标 healthy），所以这里只需要把地址写进 agent 的参数前缀。
+        //
+        // ⚠️ 漏掉它的后果我实测过：Adoption Specialist 会回答
+        //    「experiencing a brief technical hiccup accessing the pet database」。
+        //    `_ssm_value` 取不到就静默返回 ""，**不抛异常、日志无痕**，
+        //    只有真调一次 agent 才发现。
+        AgentUtils.createSsmParameters(
+            this,
+            AGENT_RUNTIME_ENV.PARAMETER_STORE_PREFIX,
+            new Map([['searchapiurl', `http://${INTERNAL_ALB_DNS}:8081`]]),
+        );
+
         // ── 五个 agent 的 ECR 仓库 ─────────────────────────────────────────
         // 上游靠 pipeline 的 containers.ts 阶段建仓库，本地没有那套，所以自建。
         // imageTagMutability 保持 MUTABLE：AgentCore 拉的是 `:latest`
@@ -318,6 +334,20 @@ export class WaggleAIAgents extends Stack {
         }
 
         // ── Gateway / Memory / KB / Guardrail 各一份，五个 agent 共用 ───────
+        //
+        // ⚠️ 下面这些 SSM 短名**必须与 agent 代码 `common/config.py` 里
+        //    `_ssm_value(...)` 的字面量逐字一致**，注意它们带 `waggleai/` 子路径：
+        //        waggleai/gatewayurl / waggleai/memoryid / waggleai/nutritionkbid
+        //        waggleai/guardrailid / waggleai/guardrailversion
+        //    我第一版写成了不带斜杠的 waggleaigatewayurl 等，结果：
+        //    `_ssm_value` 取不到就**静默返回 ""**（它 catch 了所有异常），
+        //    于是每个 tool 都报 "not configured"、orchestrator 回答用户
+        //    「Nutrition Advisor 和 Adoption specialist 因配置问题暂不可用」——
+        //    **五个 Runtime 全是 READY、Gateway 全是 READY、日志里也没有报错**，
+        //    只有实际调一次 agent 才看得出来。
+        //
+        //    `waggleairuntimearn` 不在这个列表里：那是给 **petsite** 用的
+        //    （WAGGLE_AI_RUNTIME_ARN_PARAM_NAME），不是 agent 自己读的，保持原名。
         // Memory / KB / Guardrail 不依赖 Runtime，本可在阶段 ① 就建；
         // 但把它们和 Gateway 放同一个条件里，能让阶段 ① 的产物严格限定为
         // 「推镜像所必需的最小集合」，阶段 ① 失败时要回滚的东西也最少。
@@ -327,20 +357,20 @@ export class WaggleAIAgents extends Stack {
 
         new WaggleAIGateway(this, 'WaggleAIGateway', {
             targets: gatewayTargets,
-            ssmGatewayUrlParameterName: 'waggleaigatewayurl',
+            ssmGatewayUrlParameterName: 'waggleai/gatewayurl',
         });
 
         new WaggleAIMemory(this, 'WaggleAIMemory', {
-            ssmMemoryIdParameterName: 'waggleaimemoryid',
+            ssmMemoryIdParameterName: 'waggleai/memoryid',
         });
 
         new WaggleAINutritionKb(this, 'WaggleAINutritionKb', {
-            ssmKbIdParameterName: 'waggleainutritionkbid',
+            ssmKbIdParameterName: 'waggleai/nutritionkbid',
         });
 
         new WaggleAIGuardrail(this, 'WaggleAIGuardrail', {
-            ssmGuardrailIdParameterName: 'waggleaiguardrailid',
-            ssmGuardrailVersionParameterName: 'waggleaiguardrailversion',
+            ssmGuardrailIdParameterName: 'waggleai/guardrailid',
+            ssmGuardrailVersionParameterName: 'waggleai/guardrailversion',
         });
 
         // ── 新镜像推送后自动重载 runtime ───────────────────────────────────
