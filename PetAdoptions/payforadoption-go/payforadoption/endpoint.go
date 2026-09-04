@@ -1,3 +1,7 @@
+/*
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
 package payforadoption
 
 import (
@@ -31,13 +35,14 @@ func makeHealthCheckEndpoint(s Service) endpoint.Endpoint {
 func makeCompleteAdoptionEndpoint(s Service) endpoint.Endpoint {
 	return func(ctx context.Context, request interface{}) (interface{}, error) {
 		req := request.(completeAdoptionRequest)
-		return s.CompleteAdoption(ctx, req.PetId, req.PetType)
+		return s.CompleteAdoption(ctx, req.PetId, req.PetType, req.UserID)
 	}
 }
 
 func makeCleanupAdoptionsEndpoint(s Service) endpoint.Endpoint {
-	return func(ctx context.Context, _ interface{}) (interface{}, error) {
-		return nil, s.CleanupAdoptions(ctx)
+	return func(ctx context.Context, request interface{}) (interface{}, error) {
+		req := request.(cleanupAdoptionsRequest)
+		return nil, s.CleanupAdoptions(ctx, req.UserID)
 	}
 }
 

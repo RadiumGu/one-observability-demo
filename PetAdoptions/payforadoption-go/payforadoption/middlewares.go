@@ -1,3 +1,7 @@
+/*
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
 package payforadoption
 
 import (
@@ -38,7 +42,7 @@ func NewInstrumenting(logger log.Logger, s Service) Service {
 	}
 }
 
-func (mw *middleware) CompleteAdoption(ctx context.Context, petId, petType string) (a Adoption, err error) {
+func (mw *middleware) CompleteAdoption(ctx context.Context, petId, petType, userID string) (a Adoption, err error) {
 	defer func(begin time.Time) {
 
 		labelValues := []string{
@@ -54,23 +58,35 @@ func (mw *middleware) CompleteAdoption(ctx context.Context, petId, petType strin
 		span.SetAttributes(
 			attribute.String("PetId", petId),
 			attribute.String("PetType", petType),
+			attribute.String("UserID", userID),
 			attribute.Float64("TimeTakenSeconds", time.Since(begin).Seconds()),
 		)
 
-		mw.logger.Log(
-			"method", "In CompleteAdoption",
-			"traceId", span.SpanContext().SpanID(),
-			"PetId", petId,
-			"PetType", petType,
-			"took", time.Since(begin),
-			"customer", getFakeCustomer(),
-			"err", err)
+		// Use appropriate log level based on error status
+		if err != nil {
+			ErrorWithTrace(ctx, mw.logger,
+				"method", "CompleteAdoption",
+				"endpoint", "complete_adoptions",
+				"PetId", petId,
+				"PetType", petType,
+				"UserID", userID,
+				"took", time.Since(begin),
+				"err", err)
+		} else {
+			InfoWithTrace(ctx, mw.logger,
+				"method", "CompleteAdoption",
+				"endpoint", "complete_adoptions",
+				"PetId", petId,
+				"PetType", petType,
+				"UserID", userID,
+				"took", time.Since(begin))
+		}
 	}(time.Now())
 
-	return mw.Service.CompleteAdoption(ctx, petId, petType)
+	return mw.Service.CompleteAdoption(ctx, petId, petType, userID)
 }
 
-func (mw *middleware) CleanupAdoptions(ctx context.Context) (err error) {
+func (mw *middleware) CleanupAdoptions(ctx context.Context, userID string) (err error) {
 	defer func(begin time.Time) {
 
 		labelValues := []string{
@@ -82,16 +98,29 @@ func (mw *middleware) CleanupAdoptions(ctx context.Context) (err error) {
 		mw.requestLatency.With(labelValues...).Observe(time.Since(begin).Seconds())
 
 		span := trace.SpanFromContext(ctx)
-		span.SetAttributes(attribute.Float64("TimeTakenSeconds", time.Since(begin).Seconds()))
+		span.SetAttributes(
+			attribute.String("UserID", userID),
+			attribute.Float64("TimeTakenSeconds", time.Since(begin).Seconds()),
+		)
 
-		mw.logger.Log(
-			"method", "In CleanupAdoptions",
-			"traceId", span.SpanContext().SpanID(),
-			"took", time.Since(begin),
-			"err", err)
+		// Use appropriate log level based on error status
+		if err != nil {
+			ErrorWithTrace(ctx, mw.logger,
+				"method", "CleanupAdoptions",
+				"endpoint", "cleanup_adoptions",
+				"userID", userID,
+				"took", time.Since(begin),
+				"err", err)
+		} else {
+			InfoWithTrace(ctx, mw.logger,
+				"method", "CleanupAdoptions",
+				"endpoint", "cleanup_adoptions",
+				"userID", userID,
+				"took", time.Since(begin))
+		}
 	}(time.Now())
 
-	return mw.Service.CleanupAdoptions(ctx)
+	return mw.Service.CleanupAdoptions(ctx, userID)
 }
 
 func (mw *middleware) HealthCheck(ctx context.Context) (err error) {
@@ -103,6 +132,54 @@ func (mw *middleware) HealthCheck(ctx context.Context) (err error) {
 		}
 		mw.requestCount.With(labelValues...).Add(1)
 		mw.requestLatency.With(labelValues...).Observe(time.Since(begin).Seconds())
+
+		// Add logging with trace ID for health check
+		if err != nil {
+			ErrorWithTrace(ctx, mw.logger,
+				"method", "HealthCheck",
+				"endpoint", "health_check",
+				"took", time.Since(begin),
+				"err", err)
+		} else {
+			DebugWithTrace(ctx, mw.logger,
+				"method", "HealthCheck",
+				"endpoint", "health_check",
+				"took", time.Since(begin),
+				"status", "healthy")
+		}
 	}(time.Now())
 	return mw.Service.HealthCheck(ctx)
+}
+
+func (mw *middleware) TriggerSeeding(ctx context.Context) (err error) {
+	defer func(begin time.Time) {
+		labelValues := []string{
+			"endpoint", "trigger_seeding",
+			"error", fmt.Sprint(err != nil),
+			"pettype", "",
+		}
+		mw.requestCount.With(labelValues...).Add(1)
+		mw.requestLatency.With(labelValues...).Observe(time.Since(begin).Seconds())
+
+		span := trace.SpanFromContext(ctx)
+		span.SetAttributes(
+			attribute.Float64("TimeTakenSeconds", time.Since(begin).Seconds()),
+		)
+
+		// Use appropriate log level based on error status
+		if err != nil {
+			ErrorWithTrace(ctx, mw.logger,
+				"method", "TriggerSeeding",
+				"endpoint", "trigger_seeding",
+				"took", time.Since(begin),
+				"err", err)
+		} else {
+			InfoWithTrace(ctx, mw.logger,
+				"method", "TriggerSeeding",
+				"endpoint", "trigger_seeding",
+				"took", time.Since(begin),
+				"status", "completed")
+		}
+	}(time.Now())
+	return mw.Service.TriggerSeeding(ctx)
 }

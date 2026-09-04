@@ -1,3 +1,7 @@
+<!--
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 ## Drill for PayForAdoption
 
 Using [drill](https://github.com/fcsonline/drill), this allows to generate

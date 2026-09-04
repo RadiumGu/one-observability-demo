@@ -1,3 +1,7 @@
+/*
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
 package main
 
 import (
@@ -9,118 +13,140 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/spf13/viper"
 )
 
-type dbConfig struct {
-	Engine, Host, Username, Password, Dbname string
-	Port                                     int
-}
+var refreshManager *RefreshManager
 
 func fetchConfig(ctx context.Context, logger log.Logger) (payforadoption.Config, error) {
+	if refreshManager == nil {
+		refreshManager = NewRefreshManager()
+	}
 
 	// fetch from env
 	viper.AutomaticEnv() // Bind automatically all env vars that have the same prefix
 
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		level.Error(logger).Log("aws", err)
+		ErrorWithTrace(ctx, "aws error: %v\n", err)
 	}
 
 	cfg := payforadoption.Config{
-		UpdateAdoptionURL: viper.GetString("UPDATE_ADOPTION_URL"),
-		RDSSecretArn:      viper.GetString("RDS_SECRET_ARN"),
-		AWSRegion:         viper.GetString("AWS_REGION"),
-		AWSCfg:            awsCfg,
+		AWSRegion: viper.GetString("AWS_REGION"),
+		AWSCfg:    awsCfg,
 	}
 
-	if cfg.UpdateAdoptionURL == "" || cfg.RDSSecretArn == "" {
-		return fetchConfigFromParameterStore(ctx, cfg)
+	fetchedCfg, err := refreshManager.fetchConfigIfNeeded(ctx, cfg)
+	if err == nil {
+		refreshManager.StartPeriodicRefresh(ctx, fetchedCfg)
 	}
-
-	return cfg, nil
+	return fetchedCfg, err
 }
 
-func fetchConfigFromParameterStore(ctx context.Context, cfg payforadoption.Config) (payforadoption.Config, error) {
+func fetchConfigFromParameterStore(ctx context.Context, cfg payforadoption.Config, logger log.Logger) (payforadoption.Config, error) {
 	svc := ssm.NewFromConfig(cfg.AWSCfg)
 
-	res, err := svc.GetParameters(ctx, &ssm.GetParametersInput{
-		Names: []string{
-			"/petstore/updateadoptionstatusurl",
-			"/petstore/rdssecretarn",
-			"/petstore/s3bucketname",
-			"/petstore/dynamodbtablename",
-		},
-	})
-
-	newCfg := payforadoption.Config{}
-	newCfg.AWSCfg = cfg.AWSCfg
-	newCfg.AWSRegion = cfg.AWSCfg.Region
-
-	if err != nil {
-		return newCfg, err
+	envVars := map[string]string{
+		"PETSTORE_PARAM_PREFIX":                      "",
+		"UPDATE_ADOPTIONS_STATUS_URL_PARAMETER_NAME": "",
+		"RDS_SECRET_ARN_NAME":                        "",
+		"S3_BUCKET_PARAMETER_NAME":                   "",
+		"DYNAMODB_TABLE_PARAMETER_NAME":              "",
+		"SQS_QUEUE_URL_PARAMETER_NAME":               "",
+		"PETSEARCH_URL_PARAMETER_NAME":               "",
 	}
 
-	for _, p := range res.Parameters {
-		pValue := aws.ToString(p.Value)
-
-		switch aws.ToString(p.Name) {
-		case "/petstore/rdssecretarn":
-			newCfg.RDSSecretArn = pValue
-		case "/petstore/updateadoptionstatusurl":
-			newCfg.UpdateAdoptionURL = pValue
-		case "/petstore/s3bucketname":
-			newCfg.S3BucketName = pValue
-		case "/petstore/dynamodbtablename":
-			newCfg.DynamoDBTable = pValue
+	for key := range envVars {
+		if !viper.IsSet(key) {
+			return cfg, fmt.Errorf("%s not set", key)
 		}
+		envVars[key] = viper.GetString(key)
 	}
 
-	return newCfg, err
-}
+	prefix := envVars["PETSTORE_PARAM_PREFIX"]
 
-func getSecretValue(ctx context.Context, cfg payforadoption.Config) (string, error) {
-	svc := secretsmanager.NewFromConfig(cfg.AWSCfg)
-	res, err := svc.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(cfg.RDSSecretArn),
+	paramNames := []string{
+		fmt.Sprintf("%s/%s", prefix, envVars["UPDATE_ADOPTIONS_STATUS_URL_PARAMETER_NAME"]),
+		fmt.Sprintf("%s/%s", prefix, envVars["RDS_SECRET_ARN_NAME"]),
+		fmt.Sprintf("%s/%s", prefix, envVars["S3_BUCKET_PARAMETER_NAME"]),
+		fmt.Sprintf("%s/%s", prefix, envVars["DYNAMODB_TABLE_PARAMETER_NAME"]),
+		fmt.Sprintf("%s/%s", prefix, envVars["SQS_QUEUE_URL_PARAMETER_NAME"]),
+		fmt.Sprintf("%s/%s", prefix, envVars["PETSEARCH_URL_PARAMETER_NAME"]),
+	}
+
+	InfoWithTrace(ctx, "fetching SSM parameters: %v\n", paramNames)
+
+	res, err := svc.GetParameters(ctx, &ssm.GetParametersInput{
+		Names: paramNames,
 	})
-
 	if err != nil {
-		return "", err
+		ErrorWithTrace(ctx, "failed to fetch SSM parameters %v: %v\n", paramNames, err)
+		return cfg, err
 	}
 
-	return aws.ToString(res.SecretString), nil
+	newCfg := payforadoption.Config{
+		AWSCfg:    cfg.AWSCfg,
+		AWSRegion: cfg.AWSCfg.Region,
+	}
+
+	paramMap := make(map[string]*string)
+	for _, p := range res.Parameters {
+		paramMap[aws.ToString(p.Name)] = p.Value
+	}
+
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["RDS_SECRET_ARN_NAME"])]; ok {
+		newCfg.RDSSecretArn = aws.ToString(val) //pragma: allowlist secret
+	}
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["UPDATE_ADOPTIONS_STATUS_URL_PARAMETER_NAME"])]; ok {
+		newCfg.UpdateAdoptionURL = aws.ToString(val)
+	}
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["S3_BUCKET_PARAMETER_NAME"])]; ok {
+		newCfg.S3BucketName = aws.ToString(val)
+	}
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["DYNAMODB_TABLE_PARAMETER_NAME"])]; ok {
+		newCfg.DynamoDBTable = aws.ToString(val)
+	}
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["SQS_QUEUE_URL_PARAMETER_NAME"])]; ok {
+		newCfg.SQSQueueURL = aws.ToString(val)
+	}
+	if val, ok := paramMap[fmt.Sprintf("%s/%s", prefix, envVars["PETSEARCH_URL_PARAMETER_NAME"])]; ok {
+		newCfg.PetSearchURL = aws.ToString(val)
+	}
+
+	return newCfg, nil
 }
 
 // Call aws secrets manager and return parsed sql server query str
 func getRDSConnectionString(ctx context.Context, cfg payforadoption.Config) (string, error) {
-	jsonstr, err := getSecretValue(ctx, cfg)
+	if refreshManager != nil && !refreshManager.shouldRefreshSecret() {
+		if secret, ok := refreshManager.getCachedSecret(); ok {
+			InfoWithTrace(ctx, "Using cached database secret\n")
+			var dbConfig payforadoption.DatabaseConfig
+			if err := json.Unmarshal([]byte(secret), &dbConfig); err == nil {
+				u := &url.URL{
+					Scheme: dbConfig.Engine,
+					User:   url.UserPassword(dbConfig.Username, dbConfig.Password),
+					Host:   fmt.Sprintf("%s:%d", dbConfig.Host, dbConfig.Port),
+					Path:   dbConfig.Dbname,
+				}
+				connStr := u.String() + "?sslmode=disable"
+				return connStr, nil
+			}
+		}
+	}
+
+	InfoWithTrace(ctx, "Refreshing database secret from Secrets Manager\n")
+	dcs := payforadoption.NewDatabaseConfigService(cfg)
+	secret, err := dcs.GetSecretValue(ctx)
 	if err != nil {
 		return "", err
 	}
 
-	var c dbConfig
-
-	if err := json.Unmarshal([]byte(jsonstr), &c); err != nil {
-		return "", err
+	if refreshManager != nil {
+		refreshManager.cacheSecret(secret)
 	}
 
-	u := &url.URL{
-		Scheme: c.Engine,
-		User:   url.UserPassword(c.Username, c.Password),
-		Host:   fmt.Sprintf("%s:%d", c.Host, c.Port),
-		Path:   c.Dbname,
-	}
-
-	fmt.Println(u.String())
-
-	connStr := u.String()
-	connStr += "?sslmode=disable"
-
-	// return u.String(), nil
-	return connStr, nil
+	return payforadoption.GetRDSConnectionString(ctx, cfg)
 }
