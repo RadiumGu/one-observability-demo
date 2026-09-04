@@ -206,6 +206,71 @@ export const AGENT_BACKEND_SSM: Array<{
 ];
 
 /**
+ * 五个 agent 的 runtime 清单 —— 驱动 `waggle-ai-agents-stack.ts` 里的创建循环。
+ *
+ * `runtimeName` 同时是 **AgentCore runtime 的物理名**、**CDK construct id** 和
+ * **IAM 通配符匹配的依据**，所以一个名字三处生效，改名会同时改掉逻辑 id（触发替换）。
+ * 必须匹配 `[A-Za-z0-9_]` —— 不能有连字符。
+ *
+ * `targetName` 是 Gateway 的路径段（`{gatewayUrl}/{targetName}/invocations`），
+ * **必须与 agent 代码 `delegate.py` 里写的名字一致**，否则委派调用 404。
+ * 这几个值同时也出现在 `AGENT_RUNTIME_ENV` 的 `*_TARGET` 变量里，两处必须同步。
+ *
+ * `ecrRepoName` 是本地新增的字段：上游靠 pipeline 的 `containers.ts` 阶段建仓库并用
+ * `${baseURI}/${name}` 引用，本地没有那套 pipeline，所以在 agent 栈里自己建 5 个仓库。
+ */
+export const WAGGLE_AI_AGENT_RUNTIMES: Array<{
+    /** AgentCore runtime 名，同时是 construct id。必须匹配 [A-Za-z0-9_] */
+    runtimeName: string;
+    /** Gateway 路径段，必须与 delegate.py 一致 */
+    targetName: string;
+    /** ECR 仓库名（本地自建） */
+    ecrRepoName: string;
+    /** 构建镜像时用的 Dockerfile 后缀，对应 deploy/Dockerfile.<suffix> */
+    dockerfileSuffix: string;
+    /** 额外环境变量，合并在观测默认值之上 */
+    env?: { [key: string]: string };
+    /** 把 runtime ARN 发布到 SSM 的短名（只有 orchestrator 需要 —— petsite 靠它找入口） */
+    ssmArnParameterName?: string;
+}> = [
+    {
+        runtimeName: 'WaggleAIOrchestrator',
+        targetName: 'orchestrator',
+        ecrRepoName: 'waggle-ai-orchestrator',
+        dockerfileSuffix: 'orchestrator',
+        // ⚠️ 必须显式 gateway：上游默认 local 是五 agent 同容器、委派走进程内调用，
+        //    图里只会有 1 个 AgentRuntime 节点、0 条 Delegates 边 —— 观测目标就落空了。
+        env: { AGENT_TRANSPORT: 'gateway' },
+        // petsite 的 WAGGLE_AI_RUNTIME_ARN_PARAM_NAME 指向这个参数，是前端接入 agent 的唯一入口
+        ssmArnParameterName: 'waggleairuntimearn',
+    },
+    {
+        runtimeName: 'WaggleAINutrition',
+        targetName: 'nutrition',
+        ecrRepoName: 'waggle-ai-nutrition',
+        dockerfileSuffix: 'nutrition',
+    },
+    {
+        runtimeName: 'WaggleAIOrdering',
+        targetName: 'ordering',
+        ecrRepoName: 'waggle-ai-ordering',
+        dockerfileSuffix: 'ordering',
+    },
+    {
+        runtimeName: 'WaggleAIAdoption',
+        targetName: 'adoption',
+        ecrRepoName: 'waggle-ai-adoption',
+        dockerfileSuffix: 'adoption',
+    },
+    {
+        runtimeName: 'WaggleAIConcierge',
+        targetName: 'concierge',
+        ecrRepoName: 'waggle-ai-concierge',
+        dockerfileSuffix: 'concierge',
+    },
+];
+
+/**
  * KB 的向量库配置。照搬账号内已有范式而非另起一套 ——
  * `gp-incident-kb`（2026-03-31 建，索引 incidents-v1）已在东京跑了 5 个月，
  * 证明 S3 Vectors 在本区可用且本项目已掌握其建法。

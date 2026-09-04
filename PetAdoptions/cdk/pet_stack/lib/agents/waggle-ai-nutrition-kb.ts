@@ -67,7 +67,18 @@ export class WaggleAINutritionKb extends Construct {
                 Source.asset(
                     // Built without `node:path` on purpose: `unicorn/import-style` requires a
                     // default import, which this package's tsconfig rejects (no `esModuleInterop`).
-                    `${__dirname}/../../../applications/microservices/waggle_ai_agents/rag/knowledge`,
+                    //
+                    // ⚠️ 本地改动：上游路径是
+                    //      ${__dirname}/../../../applications/microservices/waggle_ai_agents/rag/knowledge
+                    //    那是上游的目录布局（cdk/applications/microservices/<svc>/）。
+                    //    本地 agent 应用在 PetAdoptions/waggle_ai_agents/，
+                    //    从 lib/agents/ 出发要 **四级**：lib -> pet_stack -> cdk -> PetAdoptions。
+                    //    我先写了三级（只到 cdk/），synth 立刻报错 —— 层级要数准。
+                    //    路径错会在 synth 阶段就报 "Cannot find asset at ..."（不会等到部署），
+                    //    所以这类错误是安全的 —— 但报错指向的是**上游布局下的路径**，
+                    //    不看清就容易误以为文档缺失。实测本地 rag/knowledge/ 下有 10 篇 .md，
+                    //    与 AGENT_KB_CONFIG.knowledgeDocCount 一致。
+                    `${__dirname}/../../../../waggle_ai_agents/rag/knowledge`,
                 ),
             ],
             destinationBucket: sourceBucket,

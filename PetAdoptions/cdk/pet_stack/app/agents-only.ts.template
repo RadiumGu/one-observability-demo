@@ -1,0 +1,24 @@
+#!/usr/bin/env node
+import 'source-map-support/register';
+import { App, Tags } from 'aws-cdk-lib';
+import { WaggleAIAgents } from '../lib/agents/waggle-ai-agents-stack';
+const app = new App();
+const s = new WaggleAIAgents(app, "WaggleAIAgents", {
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION }});
+Tags.of(s).add("Component", "waggle-ai-agents");
+
+// ⚠️ 这不是正式入口，是**验证用**的隔离入口。
+//
+// 为什么需要它：`app/pet_stack.ts` 会构造全部三个栈，而既有的
+// `lib/services/stepfn.ts`（不是本次引入的）用了 @aws-cdk/aws-lambda-python-alpha，
+// 那需要 Docker 打包。本机没有 Docker，所以 `cdk synth WaggleAIAgents` 会
+// 直接死在 `spawnSync docker ENOENT` —— 报错看起来像 agent 栈的问题，其实不是。
+//
+// 用法（只 synth agent 栈，绕开既有的 Docker 依赖）：
+//   cp app/agents-only.ts.template app/agents-only.ts
+//   npx cdk synth WaggleAIAgents --app "npx ts-node app/agents-only.ts"
+//   rm app/agents-only.ts
+//
+// 真正部署仍走正式入口：
+//   npx cdk deploy WaggleAIAgents --context acm_certificate_arn=<arn>
+// 那时需要在有 Docker 的机器上跑（构建机 i-022fb7c32b71c72d9）。

@@ -1,0 +1,51 @@
+# TargetGroupBinding —— 把 list-adoptions / pay-for-adoption 的 Pod IP 注册进
+# WaggleAIAgents 栈新建的两个目标组。
+#
+# 为什么需要这一步：
+#   CDK 只能建目标组和 listener，**注册目标是 AWS Load Balancer Controller 的活**。
+#   只建目标组不建 TGB，listener 存在但目标组为空 —— internal ALB 会返回 **503**，
+#   而这个失败模式看起来像「服务挂了」而不是「注册没做」，很容易误诊。
+#
+# 为什么 agent 必须走 internal ALB 而不是直接调 ClusterIP：
+#   AgentCore Runtime 跑在 VPC 模式（ENI 在 11.0.x 私有子网），
+#   而 `.svc.cluster.local` 由集群内的 CoreDNS 解析、VPC ENI 用的是 Route53 Resolver
+#   —— 集群内域名在 ENI 上解析不了。所以只能经 ALB 进来。
+#
+# ⚠️ targetGroupARN 里的 ID 是 CDK 部署后才确定的。
+#    部署完取值：
+#      aws cloudformation describe-stacks --stack-name WaggleAIAgents \
+#        --query "Stacks[0].Outputs[?starts_with(OutputKey,'TargetGroupArn')].[OutputKey,OutputValue]" \
+#        --output text --region ap-northeast-1
+#    然后把下面两处 REPLACE_ME 换成实际 ARN 再 apply。
+#
+# 范式照抄集群里已有的 search-loadtest-tgb（实测 6 天前建、正常工作）。
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: list-adoptions-agent-tgb
+  namespace: petadoptions
+  labels:
+    purpose: agent-backend
+spec:
+  ipAddressType: ipv4
+  serviceRef:
+    name: list-adoptions
+    port: 80
+  targetGroupARN: REPLACE_ME_LISTADOPT_TG_ARN
+  targetType: ip
+---
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: pay-for-adoption-agent-tgb
+  namespace: petadoptions
+  labels:
+    purpose: agent-backend
+spec:
+  ipAddressType: ipv4
+  serviceRef:
+    name: pay-for-adoption
+    port: 80
+  targetGroupARN: REPLACE_ME_PAYADOPT_TG_ARN
+  targetType: ip
