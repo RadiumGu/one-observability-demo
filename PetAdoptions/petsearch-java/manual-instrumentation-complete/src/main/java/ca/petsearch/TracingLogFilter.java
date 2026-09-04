@@ -1,3 +1,7 @@
+/*
+Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+SPDX-License-Identifier: Apache-2.0
+*/
 package ca.petsearch;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
