@@ -4,6 +4,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as subs from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as ddb from 'aws-cdk-lib/aws-dynamodb';
+import * as events from 'aws-cdk-lib/aws-events';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3seeder from 'aws-cdk-lib/aws-s3-deployment';
 import * as rds from 'aws-cdk-lib/aws-rds';
@@ -24,6 +25,7 @@ import { PayForAdoptionServiceEks } from './services/pay-for-adoption-service-ek
 import { ListAdoptionsServiceEks } from './services/list-adoptions-service-eks';
 import { SearchServiceEks } from './services/search-service-eks';
 import { TrafficGeneratorServiceEks } from './services/traffic-generator-service-eks';
+import { PetFoodServiceEks } from './services/petfood-service-eks';
 import { StatusUpdaterService } from './services/status-updater-service';
 import { PetAdoptionsStepFn } from './services/stepfn';
 import { KubernetesVersion } from 'aws-cdk-lib/aws-eks';
@@ -680,6 +682,31 @@ def handler(event, context):
       region: region,
       database: auroraCluster,
       serviceType: 'ClusterIP',
+      // ⚠️ 2026-09-04 移植上游 payforadoption-go 后**必须**有这 7 个变量。
+      //
+      // 上游把 config.go 的配置契约改了：SSM 参数路径原先是**硬编码**在
+      // config.go 里的（"/petstore/updateadoptionstatusurl" 等 4 条），
+      // 现在改为从环境变量读参数**名**、再与 PETSTORE_PARAM_PREFIX 拼出全路径，
+      // 而且是**硬失败**的：
+      //     for key := range envVars {
+      //         if !viper.IsSet(key) { return cfg, fmt.Errorf("%s not set", key) }
+      //     }
+      // 配合 main.go 里三处 os.Exit(-1) —— 缺任何一个变量，Pod 直接 CrashLoopBackOff。
+      //
+      // 实测线上原本**只有 AWS_REGION**，所以不补这一组就是必然的断服。
+      // 六个 SSM 参数本身都已存在（逐个 get-parameter 验证过），缺的只是
+      // 「告诉程序参数叫什么名字」的这一层。
+      //
+      // 新契约比旧的多要两个参数：SQS_QUEUE_URL 与 PETSEARCH_URL（旧版只读 4 个）。
+      additionalEnv: {
+        PETSTORE_PARAM_PREFIX: '/petstore',
+        UPDATE_ADOPTIONS_STATUS_URL_PARAMETER_NAME: 'updateadoptionstatusurl',
+        RDS_SECRET_ARN_NAME: 'rdssecretarn',
+        S3_BUCKET_PARAMETER_NAME: 's3bucketname',
+        DYNAMODB_TABLE_PARAMETER_NAME: 'dynamodbtablename',
+        SQS_QUEUE_URL_PARAMETER_NAME: 'queueurl',
+        PETSEARCH_URL_PARAMETER_NAME: 'searchapiurl',
+      },
     });
     payForAdoptionService.addToPrincipalPolicy(readSSMParamsPolicy);
     payForAdoptionService.addToPrincipalPolicy(ddbSeedPolicy);
@@ -758,6 +785,80 @@ def handler(event, context):
     });
     trafficGeneratorService.addToPrincipalPolicy(readSSMParamsPolicy);
     trafficGeneratorService.node.addDependency(waitForLBControllerReady);
+
+    // ── PetFood service（上游 2026-08 新增的 Rust 服务，本地从零编写 EKS 部署）──
+    //
+    // 上游 src/cdk/lib/microservices/petfood.ts 走 **ECS**（ECS 命中 15、EKS 命中 0），
+    // 与本项目「所有容器跑现有 arm64 EKS，不得用 ECS」的硬约束冲突，
+    // 所以只移植应用代码（46 文件），部署层用本地 EksService 基类重写。
+
+    // 食品目录表。partition key 用 `id` —— 与上游 API_DOCUMENTATION.md 的 /api/foods/{id} 一致。
+    const petfoodFoodsTable = new ddb.Table(this, 'ddb_petfood_foods', {
+      partitionKey: { name: 'id', type: ddb.AttributeType.STRING },
+      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // 购物车表。partition key 用 `user_id`，sort key 用 `item_id` ——
+    // 一个用户的购物车是多条 item，按 user_id 查询整车、按复合键定位单项。
+    const petfoodCartsTable = new ddb.Table(this, 'ddb_petfood_carts', {
+      partitionKey: { name: 'user_id', type: ddb.AttributeType.STRING },
+      sortKey: { name: 'item_id', type: ddb.AttributeType.STRING },
+      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // 领域事件总线。上游用三个配套 Lambda 消费它
+    // （petfood-cleanup-processor-node / petfood-image-generator-python /
+    //   petfood-stock-processor-node），那三个尚未移植 ——
+    // 总线先建好，事件投递不会因为没有消费者而失败（EventBridge 无消费者时静默丢弃）。
+    const petfoodEventBus = new events.EventBus(this, 'petfood_event_bus');
+
+    const petFoodService = new PetFoodServiceEks(this, 'petfood', {
+      cluster: cluster,
+      // 构造要用它们授权（IRSA），所以必须传引用而不只是名字 ——
+      // 名字通过 additionalEnv 给应用，引用通过 props 给 IAM。
+      foodsTable: petfoodFoodsTable,
+      cartsTable: petfoodCartsTable,
+      eventBus: petfoodEventBus,
+      // Rust 服务，稳态占用低；给 64m request / 512m limit 留突发余量。
+      // 没有实测数据（服务尚未跑过），取值参照 payforadoption（32m/512m）略上调，
+      // 首次压测后应按实际用量右调 —— 这与其余五个服务同样的纪律。
+      cpu: '64m',
+      cpuLimit: '512m',
+      memory: '512Mi',
+      memoryLimit: '1Gi',
+      replicas: 2,
+      // Service 80 → 容器 8080。容器端口保持上游的 PETFOOD_PORT 默认值，
+      // 与 petsite 同形（见 eks-service.ts 里 containerPort 的注释）。
+      port: 80,
+      containerPort: 8080,
+      healthCheck: '/health',
+      instrumentation: 'otel',
+      region: region,
+      // ⚠️ ClusterIP —— 硬约束「ALB 上不得新增公网入口」。
+      //    petsite 走集群内 DNS 访问它；AgentCore 需要时走 internal ALB。
+      serviceType: 'ClusterIP',
+      additionalEnv: {
+        // 上游 config/mod.rs 的三级解析：SSM（prefix + 参数名）→ env → 默认值。
+        // 这里直接给 env，省掉建 SSM 参数那一层（表名是本栈创建的，CDK 里能直接拿到）。
+        PETFOOD_FOODS_TABLE_NAME: petfoodFoodsTable.tableName,
+        PETFOOD_CARTS_TABLE_NAME: petfoodCartsTable.tableName,
+        PETFOOD_EVENT_BUS_NAME: petfoodEventBus.eventBusName,
+        PETFOOD_PARAM_PREFIX: '/petstore',
+        PETFOOD_REGION: region,
+        // 结构化日志 —— 让 CloudWatch Logs Insights 能按字段查询而非正则抠文本
+        PETFOOD_ENABLE_JSON_LOGGING: 'true',
+        PETFOOD_EVENTS_ENABLED: 'true',
+        // ⚠️ 刻意**不设** PETFOOD_ASSETS_CDN_URL / PETFOOD_IMAGES_CDN_URL。
+        //    上游默认值是 https://petfood-assets.s3.amazonaws.com，我们没有那个桶，
+        //    所以图片会 404 —— 但服务照常起（已核实是三级降级、非 fail-fast）。
+        //    建 CloudFront 或公开 S3 桶都属于「新增公网入口」，需用户明确许可，
+        //    在拿到许可之前保持图片 404 是正确的默认。
+      },
+    });
+    petFoodService.addToPrincipalPolicy(readSSMParamsPolicy);
+    petFoodService.node.addDependency(waitForLBControllerReady);
 
     // PetStatusUpdater Lambda Function and APIGW
     const statusUpdaterService = new StatusUpdaterService(this, 'status-updater-service', {
