@@ -76,6 +76,41 @@ export class Applications extends Stack {
 
     petstoreserviceaccount.addToPrincipalPolicy(startStepFnExecutionPolicy);
 
+    // ⚠️ petsite 的 Waggle 聊天要调 AgentCore Runtime，这个权限**原先完全没有** ——
+    //    该角色只挂了 SSM/SQS/SNS/X-Ray 四个托管策略，内联里与 bedrock 相关的语句为零，
+    //    症状是聊天框每次都回
+    //      [Sorry, the connection was interrupted. Please try again.]
+    //    而那句话来自 WaggleController.cs 第 144 行的**通用 catch 兜底文案**，
+    //    把所有异常类型都归成同一句，从前端完全看不出是权限问题。
+    //    实际异常是：
+    //      AccessDeniedException: User: arn:aws:sts::...:assumed-role/
+    //        Applications-PetSiteServiceAccount... is not authorized to perform:
+    //        bedrock-agentcore:InvokeAgentRuntime
+    //    请求 0.08 秒就返回，不是超时（先前怀疑的 ALB 60s 空闲超时已当场排除）。
+    //
+    //    为什么此前的验证全部通过却漏掉它：我用 `aws bedrock-agentcore
+    //    invoke-agent-runtime` 和 loadgen 的 genai 部分测的都是**我自己的凭证**
+    //    （管理员权限），而 petsite 走的是 IRSA 服务账号角色 —— 两条不同的身份路径。
+    //    教训：验证一个应用能否调某个服务，必须用**该应用自己的身份**去调。
+    //
+    //    只授 orchestrator：petsite 只读 /petstore/agent/waggleairuntimearn 这一个
+    //    Runtime ARN；委派到 Nutrition/Adoption/Ordering/Concierge 是 orchestrator
+    //    用**它自己的角色**经 Gateway 完成的，不需要 petsite 持有那四个的权限。
+    //    两条资源都要：invoke 走的是 /runtimes/{arn}/invocations，
+    //    而 runtime 与 runtime-endpoint 是两级资源，只授前者仍会被拒。
+    const invokeWaggleRuntimePolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock-agentcore:InvokeAgentRuntime'
+      ],
+      resources: [
+        `arn:aws:bedrock-agentcore:${region}:${this.account}:runtime/WaggleAIOrchestrator-*`,
+        `arn:aws:bedrock-agentcore:${region}:${this.account}:runtime/WaggleAIOrchestrator-*/runtime-endpoint/*`
+      ]
+    });
+
+    petstoreserviceaccount.addToPrincipalPolicy(invokeWaggleRuntimePolicy);
+
     const petsiteAsset = new DockerImageAsset(this, 'petsiteAsset', {
         // 必须显式钉住 arm64：节点组是 t4g（AL2023_ARM_64_STANDARD），
         // 不指定 platform 时 DockerImageAsset 跟随**构建宿主**架构 ——
