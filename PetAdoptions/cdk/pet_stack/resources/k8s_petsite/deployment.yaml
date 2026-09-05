@@ -73,6 +73,47 @@ spec:
         # pod 级 p50 34m / p90 50m / p99 69m —— 它是全命名空间用量最高的服务。
         # 取 ~3×p99，使 HPA 阈值 60%×200m=120m 落在 p99 的 1.74 倍处：
         # 既能在负载真正上来时扩容，又不会被日常波动误触发。
+        # ⚠️ petsite 原先**三个探针一个都没有** —— 而它是唯一的用户入口。
+        #    这直接造成今天两次「全站 502 而 Pod 全程 Running/ready=true/RESTARTS=0」：
+        #      · appsettings.json 里的伪注释键让 .NET 解析 LogLevel 时抛异常、启动即崩
+        #      · 部署清单缺 9 个必需 env，ParameterNames.cs 第 36 行硬抛
+        #    两次都是应用根本没起来，而 K8s 因为没有探针无从知晓，
+        #    Endpoint 里照样挂着它、照样把流量送进去。
+        #
+        #    startupProbe 给足 60 次 × 5 秒 = 最长 300 秒宽限：
+        #    petsite 是 .NET 且启动时要读多个 SSM 参数，比 Flask 服务慢得多。
+        #    参照 search-service 那次事故 —— 实测启动 32.98 秒而 liveness 的
+        #    initialDelaySeconds 是 30，首次探测恰好打在应用起来之前，
+        #    造成 80 分钟内循环重启（restarts=3/1/3）。
+        #    K8s 规定 startupProbe 成功前其他探针都不执行，所以有了它之后
+        #    liveness/readiness 的 initialDelay 可以设 0，不必再猜启动耗时。
+        startupProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 60
+          timeoutSeconds: 3
+        # readiness 决定「是否接流量」，failureThreshold 2 × period 5 = 最快 10 秒摘出，
+        # 早于 liveness 的 30 秒重启窗口 —— 先停流量再考虑重启，顺序是有意的。
+        readinessProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+          successThreshold: 1
+        # liveness 只在应用真的卡死时兜底重启。
+        # timeoutSeconds 3 而非 K8s 默认的 1：petsite 每个请求都会调 SSM，
+        # 1 秒在 SSM 偶发抖动时会误杀。
+        livenessProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           requests:
             cpu: "200m"

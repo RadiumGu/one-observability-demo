@@ -77,6 +77,92 @@ git fetch origin
 git checkout origin/main
 ```
 
+## ⚠️ 部署坑位（踩过才知道的）
+
+### 1. `cdk deploy` 成功 ≠ 新代码上线：固定 `:latest` tag 的服务需手动重启
+
+本仓库有**两种**镜像部署机制，行为完全不同：
+
+| 机制 | 用在 | tag 形态 | 部署后是否自动换 Pod |
+|---|---|---|---|
+| `DockerImageAsset` | petsite、五个微服务 | 按内容哈希，如 `:579cdc9c…` | ✅ 会。内容变 → tag 变 → Deployment spec 变 → 滚动更新 |
+| `ContainerImageBuilder` | **pethistory** | 固定 `:latest` | ❌ **不会** |
+
+`ContainerImageBuilder` 推到固定 tag，所以镜像内容变了但 Deployment 的
+`image` 字段一个字符没动，Kubernetes 判定 spec 无变化，**不触发滚动更新**。
+
+`imagePullPolicy: Always` 救不了 —— 它只在**创建容器时**生效，
+不会让已运行的 Pod 换镜像。
+
+实测过一次（2026-09-05）：
+
+```
+ECR :latest  digest = sha256:5681042f…   （3 分钟前刚推）
+Pod 实际运行  digest = sha256:27699d4f…   ← 旧的
+imagePullPolicy = Always
+```
+
+`PHEXIT=0`、CloudFormation 一切正常，而修复根本没生效。
+**所以改了 pethistory 之后必须显式重启：**
+
+```bash
+kubectl rollout restart deploy/pethistory-deployment -n petadoptions
+kubectl rollout status  deploy/pethistory-deployment -n petadoptions --timeout=240s
+```
+
+**验证方式不要看 `rollout` 的输出，要比对 digest：**
+
+```bash
+# ECR 侧
+aws ecr describe-images --repository-name pet-adoptions-history \
+  --image-ids imageTag=latest --region ap-northeast-1 \
+  --query 'imageDetails[0].imagePushedAt'
+
+# Pod 侧（imageID 带 digest，image 字段只有 tag 看不出新旧）
+kubectl get pods -n petadoptions -l app=pethistory \
+  -o jsonpath='{range .items[*]}{.status.containerStatuses[0].imageID}{"\n"}{end}'
+```
+
+### 2. `PetAdoptionsHistory` 构造对 YAML 做**位置索引**替换
+
+`lib/applications.ts` 里该构造按下标改文档与环境变量：
+`deploymentYaml[0]` 必须是 `ServiceAccount`、`[2]` 必须是 `Deployment`，
+并按 `env[1]` / `env[3]` / `env[5]` 下标替换 `REPLACE_WITH_*` 占位符。
+
+所以改 `petadoptionshistory-py/deployment.yaml` 时：
+- **不要调整 YAML 文档顺序**，也不要在中间插入新文档
+- **不要调整 `env` 数组顺序**，也不要在前面插入新变量
+- 加探针、改 resources 这类**不影响顺序**的改动是安全的
+
+改完用这段校验，它会断言索引位置：
+
+```bash
+python3 -c "
+import yaml
+docs=[d for d in yaml.safe_load_all(open('PetAdoptions/petadoptionshistory-py/deployment.yaml')) if d]
+assert docs[0]['kind']=='ServiceAccount', '[0] 必须是 ServiceAccount'
+assert docs[2]['kind']=='Deployment',     '[2] 必须是 Deployment'
+c=docs[2]['spec']['template']['spec']['containers'][0]
+print('env 顺序:', [e['name'] for e in c['env']])
+print('OK')
+"
+```
+
+### 3. 部署验证判据必须包含**实际 HTTP 请求**
+
+`Pod Ready` 不等于应用可用，本仓库已踩过三次：
+- appsettings.json 里用 `"//"` 伪注释键 → .NET 把它当 `LogLevel` 枚举解析 →
+  启动即崩、全站 502，而 Pod 显示 `Running` / `ready=true` / `RESTARTS=0`
+- petfood 探针路径写成 `/health` 而真实路由是 `/health/status` →
+  Deployment 卡在 `Available=False`，而应用**完全健康**
+- pethistory 连接进入失败事务 → 所有请求包括 `/health/status` 都 500，
+  而 Pod 仍 `ready=true`（根因：**没配 `readinessProbe`**，
+  K8s 在未配时容器一 Running 就无条件视为 Ready，已在本分支补上）
+
+而且 petsite 的异常处理会渲染 "Oops! Something went wrong" 并返回
+**HTTP 200** —— 只看状态码会把错误页当成功。压测脚本必须扫正文标记，
+否则报表一片绿而功能完全不可用。
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.

@@ -94,6 +94,38 @@ spec:
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
+        # ⚠️ readinessProbe 原先**完全没有配**，这是一个真实缺陷而非遗漏细节：
+        #    Kubernetes 在未配 readinessProbe 时，容器只要 Running 就无条件
+        #    视为 Ready，而 Service 的 Endpoint 是按 Ready 选的 ——
+        #    于是一个「所有请求包括 /health/status 都返回 500」的 Pod
+        #    仍然在接收生产流量，且 kubectl 显示 ready=true。
+        #
+        #    这个场景真实发生过（2026-09-05）：一次 ALTER TABLE 打断了本进程
+        #    持有的长连接上的事务，psycopg 连接进入 INERROR 状态后所有查询被拒。
+        #    livenessProbe 确实检测到了（事件里有
+        #    "Liveness probe failed: HTTP probe failed with statuscode: 500"）
+        #    并最终重启了 Pod，但 liveness 的语义是「杀掉重来」，
+        #    在它累计到 failureThreshold=3（即 30 秒）之前，
+        #    Pod 一直是 Ready 状态、一直在接流量、一直返回 500。
+        #    readinessProbe 才是「暂时别给我流量」那一层，两者不可互相替代。
+        #
+        #    参数选择：
+        #    - periodSeconds 5 / failureThreshold 2 -> 最快 10 秒摘出流量，
+        #      比 liveness 的 30 秒重启窗口更早生效，正是想要的先后顺序。
+        #    - successThreshold 1 -> 恢复后立即重新接流量（连接自愈只需一次成功）。
+        #    - initialDelaySeconds 5 -> 该服务是 Flask，启动很快；
+        #      给 5 秒避免启动瞬间的无意义失败。
+        #    - timeoutSeconds 3 -> /health/status 要真的查一次库，
+        #      1 秒（K8s 默认）在 Aurora 偶发抖动时会误判。
+        readinessProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+          successThreshold: 1
         resources:
           requests:
             # 32m 是实测右调后的值（2026-08-30 压测中 5 分钟 40 样本：
