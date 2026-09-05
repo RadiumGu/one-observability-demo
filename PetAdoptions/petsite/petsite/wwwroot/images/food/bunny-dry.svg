@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="bunny dry food">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7fbfa"/>
+      <stop offset="100%" stop-color="#e6efed"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="url(#bg)"/>
+  <circle cx="128" cy="96" r="46" fill="#ffffff" opacity="0.9"/>
+  <text x="128" y="114" font-size="52" text-anchor="middle" dominant-baseline="auto">🐰</text>
+  <ellipse cx="96" cy="150" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-24 96 150)"/><ellipse cx="128" cy="138" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-4 128 138)"/><ellipse cx="160" cy="152" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-18 160 152)"/><ellipse cx="112" cy="176" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(18 112 176)"/><ellipse cx="146" cy="172" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-12 146 172)"/><ellipse cx="80" cy="176" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-14 80 176)"/><ellipse cx="176" cy="176" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(22 176 176)"/><ellipse cx="128" cy="196" rx="11" ry="8" fill="#c8862a" opacity="0.85" transform="rotate(-6 128 196)"/>
+  <rect x="0" y="212" width="256" height="44" fill="#0f9d8f"/>
+  <text x="128" y="240" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="18"
+        font-weight="600" fill="#ffffff" text-anchor="middle" letter-spacing="1.5">DRY FOOD</text>
+</svg>

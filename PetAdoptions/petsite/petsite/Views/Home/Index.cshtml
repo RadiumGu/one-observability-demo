@@ -6,14 +6,29 @@
 
     var petCount = Model.Pets?.Count() ?? 0;
 
-    // Fixed hero pair; the CDN host comes from a result peturl so it works in every deployment.
+    // Hero 图直接取搜索结果里的 peturl，**不要**从里面截主机名再拼新路径。
+    //
+    // 原实现是 `cdn = sampleUri.GetLeftPart(UriPartial.Authority)` 然后拼
+    // `cdn + "/puppies/p9.jpg"` 与 `cdn + "/kittens/k1.jpg"`，两处都坏：
+    //
+    //  ① peturl 是 **presigned URL**，签名在查询串里，而 GetLeftPart(Authority)
+    //     只保留主机名、把整段查询串丢掉。桶的四项公共访问阻断全为 true，
+    //     所以拼出来的裸 URL 必然 403（实测两个 hero URL 都是 403）。
+    //  ② 前缀名还写错了：桶里是 `kitten/`（单数），代码拼的是 `kittens/`。
+    //     实测桶内顶层只有 puppies/ kitten/ bunnies/ __MACOSX/。
+    //
+    // 改为按 pettype 从结果里挑两只，用它们**自己的 peturl** ——
+    // 那本来就是带签名、可直接取的 URL，也不必假设桶里有某个固定文件名。
+    // 挑不到对应类型时回落到任意有 peturl 的宠物，只有结果为空才不渲染。
     string heroPuppy = null, heroKitten = null;
-    var sample = Model.Pets?.FirstOrDefault(p => !string.IsNullOrEmpty(p.peturl))?.peturl;
-    if (!string.IsNullOrEmpty(sample) && Uri.TryCreate(sample, UriKind.Absolute, out var sampleUri))
+    if (Model.Pets != null)
     {
-        var cdn = sampleUri.GetLeftPart(UriPartial.Authority);
-        heroPuppy = cdn + "/puppies/p9.jpg";
-        heroKitten = cdn + "/kittens/k1.jpg";
+        var withUrl = Model.Pets.Where(p => !string.IsNullOrEmpty(p.peturl)).ToList();
+        heroPuppy = withUrl.FirstOrDefault(p => p.pettype == "puppy")?.peturl
+                    ?? withUrl.ElementAtOrDefault(0)?.peturl;
+        heroKitten = withUrl.FirstOrDefault(p => p.pettype == "kitten")?.peturl
+                     ?? withUrl.ElementAtOrDefault(1)?.peturl
+                     ?? heroPuppy;
     }
 }
 

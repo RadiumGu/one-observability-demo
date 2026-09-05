@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="kitten treats food">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7fbfa"/>
+      <stop offset="100%" stop-color="#e6efed"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="url(#bg)"/>
+  <circle cx="128" cy="96" r="46" fill="#ffffff" opacity="0.9"/>
+  <text x="128" y="114" font-size="52" text-anchor="middle" dominant-baseline="auto">🐱</text>
+  <g transform="translate(100 148)"><circle cx="-7" cy="-5" r="6" fill="#c2544a"/><circle cx="-7" cy="5" r="6" fill="#c2544a"/><circle cx="9" cy="-5" r="6" fill="#c2544a"/><circle cx="9" cy="5" r="6" fill="#c2544a"/><rect x="-7" y="-4" width="16" height="8" fill="#c2544a"/></g><g transform="translate(140 142)"><circle cx="-7" cy="-5" r="6" fill="#c2544a"/><circle cx="-7" cy="5" r="6" fill="#c2544a"/><circle cx="9" cy="-5" r="6" fill="#c2544a"/><circle cx="9" cy="5" r="6" fill="#c2544a"/><rect x="-7" y="-4" width="16" height="8" fill="#c2544a"/></g><g transform="translate(120 174)"><circle cx="-7" cy="-5" r="6" fill="#c2544a"/><circle cx="-7" cy="5" r="6" fill="#c2544a"/><circle cx="9" cy="-5" r="6" fill="#c2544a"/><circle cx="9" cy="5" r="6" fill="#c2544a"/><rect x="-7" y="-4" width="16" height="8" fill="#c2544a"/></g><g transform="translate(160 168)"><circle cx="-7" cy="-5" r="6" fill="#c2544a"/><circle cx="-7" cy="5" r="6" fill="#c2544a"/><circle cx="9" cy="-5" r="6" fill="#c2544a"/><circle cx="9" cy="5" r="6" fill="#c2544a"/><rect x="-7" y="-4" width="16" height="8" fill="#c2544a"/></g><g transform="translate(86 176)"><circle cx="-7" cy="-5" r="6" fill="#c2544a"/><circle cx="-7" cy="5" r="6" fill="#c2544a"/><circle cx="9" cy="-5" r="6" fill="#c2544a"/><circle cx="9" cy="5" r="6" fill="#c2544a"/><rect x="-7" y="-4" width="16" height="8" fill="#c2544a"/></g>
+  <rect x="0" y="212" width="256" height="44" fill="#0f9d8f"/>
+  <text x="128" y="240" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="18"
+        font-weight="600" fill="#ffffff" text-anchor="middle" letter-spacing="1.5">TREATS</text>
+</svg>

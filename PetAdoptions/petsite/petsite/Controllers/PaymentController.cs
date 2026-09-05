@@ -116,8 +116,24 @@ namespace PetSite.Controllers
 
         private async Task<HttpResponseMessage> PostTransaction(string petId, string pettype)
         {
-            return await _httpClient.PostAsync($"{_configuration["paymentapiurl"]}?petId={petId}&petType={pettype}",
-                null);
+            // ⚠️ userId 是**必填**的。payforadoption 的 decodeCompleteAdoptionRequest
+            //    （transport.go:100-108）三个查询参数缺一即返回 ErrBadRequest：
+            //      if petId == "" || petType == "" || userID == "" { return nil, ErrBadRequest }
+            //    原实现只传 petId 与 petType，导致**每次点「领养」都 400**。
+            //    实测：不带 userId 返回 400 {"error":"bad request"}；
+            //          带上 userId 返回 200 + 交易 ID，且宠物 availability 转为 no。
+            //
+            //    这个不一致来自上游移植（9f2bffbd）：服务端新增了 userID 必填校验，
+            //    而 petsite 侧的调用没跟上。日志里能看到 petsite Pod 自己的 IP
+            //    在持续打这个端点并持续 400 —— 失败方与发起方是同一个服务。
+            //
+            //    userId 由 BaseController 从查询串取（见 BaseController.EnsureUserId），
+            //    首页会在缺失时生成并重定向，所以这里总能拿到值。
+            var userId = Request.Query["userId"].ToString();
+            var url = $"{_configuration["paymentapiurl"]}?petId={Uri.EscapeDataString(petId)}"
+                      + $"&petType={Uri.EscapeDataString(pettype)}"
+                      + $"&userId={Uri.EscapeDataString(userId)}";
+            return await _httpClient.PostAsync(url, null);
         }
 
         private async Task<SendMessageResponse> PostMessageToSqs(string petId, string petType)

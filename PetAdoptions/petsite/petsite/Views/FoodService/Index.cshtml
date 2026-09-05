@@ -30,7 +30,23 @@
             {
                 <div class="col-md-4 mb-3">
                     <div class="card">
-                        <img src="@food.image" class="card-img-top" alt="@food.name" style="height: 200px; object-fit: cover;">
+                        @* petfood 的 seed 数据里 `image` 字段是**空串** —— 上游靠
+                           PETFOOD_ASSETS_CDN_URL / PETFOOD_IMAGES_CDN_URL 指向 CloudFront
+                           来填它，而本项目刻意不设那两个变量（硬约束：ALB 不得新增公网入口，
+                           也不引入 CloudFront 分发）。空 src 会让浏览器渲染成破图图标，
+                           所以这里必须做兜底而不是直接输出 @food.image。 *@
+                        @if (!string.IsNullOrWhiteSpace(food.image))
+                        {
+                            <img src="@food.image" class="card-img-top" alt="@food.name" style="height: 200px; object-fit: cover;">
+                        }
+                        else
+                        {
+                            <div class="card-img-top d-flex align-items-center justify-content-center"
+                                 style="height: 200px; background: #f1f5f4; color: #94a3a0; font-size: 3rem;"
+                                 role="img" aria-label="@food.name">
+                                @(food.pet_type == "kitten" ? "🐱" : food.pet_type == "bunny" ? "🐰" : "🐶")
+                            </div>
+                        }
                         <div class="card-body" style="position: relative;">
                             <h5 class="card-title">@food.name</h5>
                             <p class="card-text">@food.description</p>
@@ -64,16 +80,26 @@
 </div>
 
 <!-- Modal -->
+@* ⚠️ 这里的 dismiss 属性必须是 `data-dismiss`（无 bs），不是 `data-bs-dismiss`。
+   本项目打包的是 **Bootstrap v4.3.1**（wwwroot/lib/bootstrap/dist/js/bootstrap.min.js
+   自报版本），而 `data-bs-dismiss` 是 Bootstrap **5** 的属性名，v4 完全不识别 ——
+   点 Close 没有任何反应，弹窗关不掉。
+   下面第 144 行的 `$('#foodModal').modal('show')` 是 jQuery 插件调用，
+   Bootstrap 5 已移除该插件，它能工作恰恰反证运行时是 v4。
+   全站仅此 2 处用了 v5 写法（data-dismiss 0 处），是上游按 v5 写的视图
+   落到 v4 运行时上造成的。 *@
 <div class="modal fade" id="foodModal" tabindex="-1" role="dialog">
     <div class="modal-dialog" role="document">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="modalTitle"></h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
             </div>
             <div class="modal-body" id="modalBody"></div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
             </div>
         </div>
     </div>
@@ -131,8 +157,12 @@ $(document).ready(function() {
         var image = $(this).data('food-image');
 
         $('#modalTitle').text(name);
+        // 与卡片同理：image 为空时不要输出 <img src="">，否则渲染成破图。
+        var imageHtml = image
+            ? `<img src="${image}" class="img-fluid mb-3" alt="${name}" style="max-height: 200px; object-fit: cover;">`
+            : '';
         $('#modalBody').html(`
-            <img src="${image}" class="img-fluid mb-3" alt="${name}" style="max-height: 200px; object-fit: cover;">
+            ${imageHtml}
             <p><strong>Description:</strong> ${description}</p>
             <p><strong>Price:</strong> $${price} | <strong>Quantity:</strong> ${quantity}</p>
             <p><strong>For:</strong> ${petType} | <strong>Type:</strong> ${type}</p>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="puppy wet food">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7fbfa"/>
+      <stop offset="100%" stop-color="#e6efed"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="url(#bg)"/>
+  <circle cx="128" cy="96" r="46" fill="#ffffff" opacity="0.9"/>
+  <text x="128" y="114" font-size="52" text-anchor="middle" dominant-baseline="auto">🐶</text>
+  <path d="M64 150 h128 a8 8 0 0 1 8 8 v10 a64 34 0 0 1 -144 0 v-10 a8 8 0 0 1 8 -8 z" fill="#3b82a6" opacity="0.28"/><ellipse cx="128" cy="158" rx="60" ry="16" fill="#3b82a6" opacity="0.55"/><rect x="98" y="146" width="20" height="14" rx="4" fill="#3b82a6" transform="rotate(-12 108 153)"/><rect x="124" y="140" width="20" height="14" rx="4" fill="#3b82a6" transform="rotate(8 134 147)"/><rect x="150" y="150" width="20" height="14" rx="4" fill="#3b82a6" transform="rotate(-6 160 157)"/><rect x="112" y="158" width="20" height="14" rx="4" fill="#3b82a6" transform="rotate(15 122 165)"/>
+  <rect x="0" y="212" width="256" height="44" fill="#0f9d8f"/>
+  <text x="128" y="240" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="18"
+        font-weight="600" fill="#ffffff" text-anchor="middle" letter-spacing="1.5">WET FOOD</text>
+</svg>

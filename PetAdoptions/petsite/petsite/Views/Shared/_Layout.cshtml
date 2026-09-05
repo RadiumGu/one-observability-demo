@@ -1,15 +1,36 @@
 @using Microsoft.AspNetCore.Html
-@using Amazon.SimpleSystemsManagement
-@using Amazon.SimpleSystemsManagement.Model
+@using PetSite.Configuration
+@inject ParameterRefreshManager RefreshManager
 @{
+    // RUM 脚本经 ParameterRefreshManager 读取（默认 300 秒缓存）。
+    //
+    // 原实现有五个叠加问题，合起来造成**每分钟约 42 次无效 SSM 调用**
+    // （CloudTrail 实测 50 条 GetParameter 里 49 条是它）：
+    //
+    //  ① 参数名写死成 "/petstore/rumscriptparameter" —— 真实名是 "/petstore/rumscript"，
+    //     多了 "parameter" 后缀，每次调用必然 ParameterNotFound。
+    //     而 Pod 里本来就有 env RUM_SCRIPT_PARAMETER_NAME=rumscript，代码却没用它。
+    //  ② 每次渲染都 `new AmazonSimpleSystemsManagementClient()` —— 客户端不复用，
+    //     每个都自带连接池与凭证解析开销。
+    //  ③ 完全没有缓存，而这是**共享布局页**，每渲染一个页面就调一次 SSM。
+    //  ④ `.Result` 在 Razor 里同步阻塞异步调用，有线程池饥饿风险。
+    //  ⑤ `catch { }` 吞掉一切异常 —— 所以这个错误存在很久而始终无人发现，
+    //     日志里只留下 AWS SDK 自己打的 ParameterNotFoundException 噪声。
+    //
+    // 注意：该参数的值是 CDK（services-eks.ts:1057）写入的**单个空格** `' '`，
+    // 即 RUM 本就未启用。所以修好名字也只会拿到空白 —— 下面的
+    // IsNullOrWhiteSpace 判断因此仍然不会输出任何脚本，行为正确。
+    // 修这个的意义在于消除无效调用与日志噪声，而不是启用 RUM。
     string rumScript = "";
     try
     {
-        rumScript = new AmazonSimpleSystemsManagementClient().GetParameterAsync(new GetParameterRequest() { Name = "/petstore/rumscriptparameter" }).Result.Parameter.Value;
+        var rumParamName = Environment.GetEnvironmentVariable("RUM_SCRIPT_PARAMETER_NAME") ?? "rumscript";
+        rumScript = await RefreshManager.GetParameterAsync(rumParamName);
     }
-    catch
+    catch (Exception)
     {
-        // RUM script not available
+        // RUM script not available —— 保持静默降级（页面不应因缺 RUM 而挂），
+        // 但真实原因现在能从 ParameterRefreshManager 的日志里看到。
     }
 }
 
