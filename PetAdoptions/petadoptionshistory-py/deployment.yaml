@@ -88,6 +88,28 @@ spec:
           value: "REPLACE_WITH_AWS_REGION"
         - name: OTEL_METRICS_EXPORTER
           value: "otlp"
+        # startupProbe：pethistory 实测「容器启动 -> Ready」耗时 **41 秒**
+        #   （启动时要取 Secrets Manager 密钥、建 Aurora 连接、跑一次探测查询）。
+        #   而 livenessProbe 是 initialDelay 30 + 3×10s = 最晚 60 秒才杀，
+        #   余量只有 19 秒 —— 这正是 search-service 那次事故的同型风险
+        #   （实测启动 31.091 秒 vs initialDelaySeconds 30，
+        #    HPA 扩容造成 CPU 争抢时必然进重启循环，80 分钟内 restarts=3/1/3）。
+        #
+        #   K8s 规定 startupProbe 成功前 liveness 与 readiness 都不执行，
+        #   所以「启动慢」与「运行中卡死」终于用两组独立参数表达，
+        #   不再靠一个猜死的常数同时兼顾。
+        #   30×5 = 最长 150 秒宽限，是实测 41 秒的 3.6 倍余量。
+        #
+        #   ⚠️ 对照：同批的 list-adoptions / pay-for-adoption / petfood 实测
+        #   只需 6~7 秒，readinessProbe 的 initialDelay 5 + 3×5s 已足够覆盖，
+        #   **刻意不给它们加 startupProbe** —— 按实测数据决定而非按服务类型推断。
+        startupProbe:
+          httpGet:
+            path: /health/status
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 30
+          timeoutSeconds: 3
         livenessProbe:
           httpGet:
             path: /health/status
