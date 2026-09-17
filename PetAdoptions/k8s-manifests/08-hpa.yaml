@@ -35,6 +35,67 @@ spec:
       target:
         type: Utilization
         averageUtilization: 60
+  # ── behavior：阻止单个瞬时采样触发一次完整的扩缩往返 ──────────────────
+  #
+  # ## 2026-09-16 01:17 事件的直接成因
+  #
+  # 未设 behavior 时用 Kubernetes 默认：scaleUp 稳定窗口 **0 秒**
+  # （一个采样越阈值就扩），scaleDown 稳定窗口 300 秒。实测那次：
+  #
+  #     01:09:23  扩容 3->4，理由 "cpu resource utilization (percentage of request)"
+  #     01:14:39  缩回 3，理由 "All metrics below target"    ← 相隔 5 分 16 秒
+  #
+  # 5 分 16 秒 ≈ 默认的 300 秒 scaleDown 窗口，说明扩容那一下是**单个采样**
+  # 造成的，之后 CPU 一直在目标以下。
+  #
+  # 为什么单个采样就够：requests.cpu=200m、limits.cpu=512m、目标 60% of
+  # request = 120m。而 Container Insights 实测 petsite 在整个窗口
+  # （00:51~01:34）的 pod_cpu_utilization_over_pod_limit 只有 5.8%~21.1%，
+  # 即约 30m~108m = **15%~54% of request**。**峰值就贴在 60% 阈值下沿**，
+  # 偶尔一个采样越过 120m 就触发一次完整往返。
+  #
+  # ## 为什么这不只是「多起一个 Pod」
+  #
+  # 缩容杀 Pod 时，长连接请求会被中途切断。实测同一分钟：
+  #
+  #     01:15:23  waggle 请求到达（正常 21~33 秒的 SSE 流）。此时 preStop
+  #               `sleep 45`（01:14:39 起）还没走完，容器约在 01:15:24 被杀
+  #               —— 这个请求只活了 1 秒
+  #     01:17:53  客户端等满 TIMEOUT=150s 报 TimeoutError
+  #               01:15:23 + 150 = 01:17:53，**分秒不差**
+  #
+  # 等满整个超时说明连接建成后对端静默 —— 流被中途杀掉的形态。
+  # 同期领养流量 8 次支付有 2 次打到同一个终止中的 Pod：整轮 98 秒
+  # （常态 7~8 秒）、支付 6/8。ALB 侧无任何记录（5XX / 连接错误 / 不健康主机
+  # 全为零），因为在它看来目标是正常 draining、连接也正常建立。
+  #
+  # ## 取值理由
+  #
+  #   scaleUp   稳定窗口 180s —— 要求「持续」高于阈值才扩，单采样不算。
+  #             每 60s 最多 +1：真实负载上升仍能跟上（4 分钟到 max）。
+  #   scaleDown 稳定窗口 600s + 每 180s 最多 -1 —— 缩容是会切断长连接的
+  #             那一侧，宁可多留一会儿。
+  #
+  # ⚠️ 这只治「频繁触发缩容」。**长连接在终止窗口内被切断这件事本身没治** ——
+  # preStop `sleep 45` 期间容器仍在收新请求，第 44 秒到达的请求只有 1 秒寿命。
+  # 要根治得让 preStop 覆盖「ALB 注销传播 + 最长在途请求」，
+  # 那要动 petsite 的 Deployment，已单独记录未擅自改。
+  #
+  # ⚠️ 线上已用 kubectl patch 先行生效；那不进 IaC，CDK 重新部署会覆盖回默认，
+  # 所以两处都要有。
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
