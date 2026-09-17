@@ -710,6 +710,31 @@ def handler(event, context):
     });
     payForAdoptionService.addToPrincipalPolicy(readSSMParamsPolicy);
     payForAdoptionService.addToPrincipalPolicy(ddbSeedPolicy);
+    // ⚠️ 2026-09-17 补：**功能和配置都加了，权限漏了**。
+    //
+    // 上面那次移植（2026-09-04）为新契约加了 `SQS_QUEUE_URL_PARAMETER_NAME`，
+    // 而 payforadoption-go 的 SendHistoryMessage 会真的去 SendMessage ——
+    // 但这个角色从来没有过 sqs 权限。后果实测（X-Ray 6 小时窗口）：
+    //
+    //     payforadoption -> SQS   Total=2541  Ok=0  Err=2541   ← 100% 失败
+    //     payforadoption -> 其他每条边          Ok = Total
+    //
+    // 源侧日志逐条对上：`api error AccessDenied` 403 +
+    // `action=send_history_message_failed` —— 领养历史消息一条都没发出去。
+    //
+    // **为什么此前没人发现**：这条依赖边不在依赖图谱里（etl_xray 把
+    // X-Ray 上报名 `payforadoption-api-go` 逐字当图谱服务名用，解析不出来，
+    // 于是该服务的全部出边都落不进图谱）。调用失败又被业务代码吞掉，
+    // 领养流程照常成功。**没有边就没有人看这条边的错误率。**
+    //
+    // 权限刻意收窄到单个队列 ARN + 三个动作，**不照抄 petsite 的
+    // AmazonSQSFullAccess**（那个托管策略本身过宽，不作为范例）。
+    payForAdoptionService.addToPrincipalPolicy(new iam.PolicyStatement({
+      sid: 'SendAdoptionHistoryMessage',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage', 'sqs:GetQueueAttributes', 'sqs:GetQueueUrl'],
+      resources: [sqsQueue.queueArn],
+    }));
     payForAdoptionService.node.addDependency(waitForLBControllerReady);
 
     // ListAdoptions service - EKS deployment
