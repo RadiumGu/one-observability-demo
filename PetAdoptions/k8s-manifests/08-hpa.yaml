@@ -116,6 +116,32 @@ spec:
       target:
         type: Utilization
         averageUtilization: 60
+  # ── behavior：与 petsite-hpa 同一套稳定窗口（理由见该处长注释）──────────
+  #
+  # ⚠️ 这四个 HPA 的加固是**预防性**的，与 petsite 不同 ——
+  # 实测 2026-09-11~09-17 六天里 petsite-hpa 有 401 次 SuccessfulRescale
+  # （209 次缩到 2 + 192 次扩到 3），而这四个是 **0 次**。
+  #
+  # 但它们不抖的原因是**空闲**，不是配置合理：绝对阈值算出来更低 ——
+  #     pay-for-adoption  requests.cpu=32m  × 60%  = 19.2m
+  #     list-adoptions    requests.cpu=48m  × 60%  = 28.8m
+  #     pethistory        requests.cpu=32m  × 60%  = 19.2m
+  #     search-service    requests.cpu=256m × 120% = 307m
+  # 当前利用率只有 3%~8%（约 1~2m），所以没越线。**负载一起来会比 petsite
+  # 抖得更凶**，而缩容会切断长连接（见 petsite-hpa 处那次实测）。
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -136,6 +162,32 @@ spec:
       target:
         type: Utilization
         averageUtilization: 60
+  # ── behavior：与 petsite-hpa 同一套稳定窗口（理由见该处长注释）──────────
+  #
+  # ⚠️ 这四个 HPA 的加固是**预防性**的，与 petsite 不同 ——
+  # 实测 2026-09-11~09-17 六天里 petsite-hpa 有 401 次 SuccessfulRescale
+  # （209 次缩到 2 + 192 次扩到 3），而这四个是 **0 次**。
+  #
+  # 但它们不抖的原因是**空闲**，不是配置合理：绝对阈值算出来更低 ——
+  #     pay-for-adoption  requests.cpu=32m  × 60%  = 19.2m
+  #     list-adoptions    requests.cpu=48m  × 60%  = 28.8m
+  #     pethistory        requests.cpu=32m  × 60%  = 19.2m
+  #     search-service    requests.cpu=256m × 120% = 307m
+  # 当前利用率只有 3%~8%（约 1~2m），所以没越线。**负载一起来会比 petsite
+  # 抖得更凶**，而缩容会切断长连接（见 petsite-hpa 处那次实测）。
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -156,6 +208,32 @@ spec:
       target:
         type: Utilization
         averageUtilization: 120
+  # ── behavior：与 petsite-hpa 同一套稳定窗口（理由见该处长注释）──────────
+  #
+  # ⚠️ 这四个 HPA 的加固是**预防性**的，与 petsite 不同 ——
+  # 实测 2026-09-11~09-17 六天里 petsite-hpa 有 401 次 SuccessfulRescale
+  # （209 次缩到 2 + 192 次扩到 3），而这四个是 **0 次**。
+  #
+  # 但它们不抖的原因是**空闲**，不是配置合理：绝对阈值算出来更低 ——
+  #     pay-for-adoption  requests.cpu=32m  × 60%  = 19.2m
+  #     list-adoptions    requests.cpu=48m  × 60%  = 28.8m
+  #     pethistory        requests.cpu=32m  × 60%  = 19.2m
+  #     search-service    requests.cpu=256m × 120% = 307m
+  # 当前利用率只有 3%~8%（约 1~2m），所以没越线。**负载一起来会比 petsite
+  # 抖得更凶**，而缩容会切断长连接（见 petsite-hpa 处那次实测）。
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -176,3 +254,29 @@ spec:
       target:
         type: Utilization
         averageUtilization: 60
+  # ── behavior：与 petsite-hpa 同一套稳定窗口（理由见该处长注释）──────────
+  #
+  # ⚠️ 这四个 HPA 的加固是**预防性**的，与 petsite 不同 ——
+  # 实测 2026-09-11~09-17 六天里 petsite-hpa 有 401 次 SuccessfulRescale
+  # （209 次缩到 2 + 192 次扩到 3），而这四个是 **0 次**。
+  #
+  # 但它们不抖的原因是**空闲**，不是配置合理：绝对阈值算出来更低 ——
+  #     pay-for-adoption  requests.cpu=32m  × 60%  = 19.2m
+  #     list-adoptions    requests.cpu=48m  × 60%  = 28.8m
+  #     pethistory        requests.cpu=32m  × 60%  = 19.2m
+  #     search-service    requests.cpu=256m × 120% = 307m
+  # 当前利用率只有 3%~8%（约 1~2m），所以没越线。**负载一起来会比 petsite
+  # 抖得更凶**，而缩容会切断长连接（见 petsite-hpa 处那次实测）。
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180

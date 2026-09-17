@@ -33,6 +33,43 @@ spec:
         app: petsite
     spec:
       serviceAccountName: petsite-sa
+      # ── 优雅停机：必须盖过「ALB 连接复用窗口 + 最长在途请求」──────────────
+      #
+      # ## 2026-09-16 01:17 实测的完整链路
+      #
+      #   T+0    Pod 删除 → preStop 开始；ALB 目标转 draining
+      #   ...    ALB 不再开新连接，但**复用现有 keep-alive 连接可达 60 秒**
+      #          （internal ALB 的 idle_timeout.timeout_seconds = 60）
+      #   T+44   一个 waggle 请求经复用连接到达（正常是 21~33 秒的 SSE 流）
+      #   T+45   旧的 `sleep 45` 结束 → SIGTERM → petsite **没有设置
+      #          ShutdownTimeout**，用 ASP.NET Core 默认 **5 秒**
+      #          → 那个流在 T+50 被切断
+      #   客户端 等满自己的 150 秒超时才报错（连接建成后对端静默）
+      #
+      # 时刻严丝合缝：01:14:39 + 44 = 01:15:23（请求到达），
+      # 01:15:23 + 150 = 01:17:53（告警时刻）。ALB 侧全零（5XX / 连接错误 /
+      # 不健康主机）—— 在它看来目标是正常 draining、连接也正常建立。
+      #
+      # 不是孤例：2026-09-11~09-17 六天里 petsite-hpa 有 401 次 SuccessfulRescale
+      # （209 缩 + 192 扩），每次缩容都是一次这样的机会。
+      #
+      # ## 取值推导
+      #
+      #   preStop ≥ ALB idle_timeout(60s) + 最长在途请求(waggle 实测 max 32.6s)
+      #           = 92.6s → 取 100s（留 7s 余量）
+      #   terminationGracePeriodSeconds > preStop，否则宽限期到点 K8s 直接
+      #           SIGKILL、preStop 还没走完 → 取 150s
+      #
+      # 这样最后一个可能经复用连接到达的请求在 T+60，它有 40 秒完成
+      # （最长需 33 秒）；到 T+100 的 SIGTERM 时已无在途请求，
+      # **Kestrel 那 5 秒的默认 ShutdownTimeout 就不再是问题**。
+      #
+      # ⚠️ 更正的做法是同时在应用侧调大 ShutdownTimeout（petsite 未设置）。
+      # 那需要重建镜像，本环境无 dotnet/docker，所以先用 K8s 层完全覆盖。
+      #
+      # ⚠️ 双源：CDK 侧 cdk/pet_stack/resources/k8s_petsite/deployment.yaml
+      # 必须同步（见本文件头部的双源警告）。线上已 kubectl patch 先行生效。
+      terminationGracePeriodSeconds: 150
       topologySpreadConstraints:
       - labelSelector:
           matchLabels:
@@ -69,6 +106,12 @@ spec:
           limits:
             cpu: "512m"
             memory: "1Gi"
+        # preStop 的取值推导见本文件 podSpec 处的
+        # terminationGracePeriodSeconds 长注释。
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 100"]
 ---
 apiVersion: v1
 kind: Service
