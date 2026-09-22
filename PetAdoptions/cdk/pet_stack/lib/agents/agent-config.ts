@@ -30,9 +30,35 @@ export const TOKYO_MODEL_IDS = {
      * 替代 us.meta.llama4-maverick-17b-instruct-v1:0。
      * **东京完全没有任何 Llama 模型**（inference profile 与 on-demand 都查过），
      * 这是 Step 0 唯一查出的真阻塞。LlamaIndex 是框架、跑在 Bedrock Converse 上，
-     * 并不要求模型必须是 Llama —— adoption 是检索组装型任务，Haiku 足够且更省。
+     * 并不要求模型必须是 Llama —— adoption 是检索组装型任务。
+     *
+     * ⚠️ 2026-09-22 从 `jp.anthropic.claude-haiku-4-5-20251001-v1:0` 切到 Sonnet。
+     *
+     * 原因：那个 Haiku 在东京 `jp.` profile 上开始持续返回
+     * `ServiceUnavailableException: Bedrock is unable to process your request`。
+     * 直调实测（同一时刻、同一账号、各 3~5 次）：
+     *
+     *     jp.anthropic.claude-haiku-4-5-20251001-v1:0   成功 0
+     *     jp.anthropic.claude-sonnet-4-6                成功 3
+     *     jp.amazon.nova-2-lite-v1:0                    成功 3
+     *
+     * 故障 14 分钟内账号级 InvocationServerErrors 从 6/分钟涨到 31/分钟，
+     * 不是自行恢复的走势，所以做了切换而不是等待。
+     *
+     * **两层重试叠加把「模型不可用」放大成「整条路径挂掉」**：
+     * boto3 自己先重试满 10 次（日志原文 `reached max retries: 10`），
+     * LlamaIndex 的 tenacity 在外面再重试一轮（`before_sleep.py:64`
+     * `Retrying ... in 4 seconds`）。合起来远超 ALB idle_timeout=60s，
+     * 于是合成流量探针收到 **HTTP 504** 而不是一个快速失败。
+     * 这一层要治得改 agent 代码（上游 LlamaIndex 调用处），不在本文件范围内。
+     *
+     * 选 Sonnet 而不是 Nova：`NUTRITION_MODEL_ID` / `ORCHESTRATOR_MODEL_ID`
+     * 已经在用它，LlamaIndex bedrock_converse + 该模型在本部署里是**验证过**的
+     * 组合；Nova 虽然也可调，但工具调用行为与 Claude 家族有差异，
+     * 故障处置时换族是额外风险。Haiku 恢复后可以切回（更省），
+     * 但切回前必须重跑上面那组直调验证。
      */
-    ADOPTION_SUBSTITUTE: 'jp.anthropic.claude-haiku-4-5-20251001-v1:0',
+    ADOPTION_SUBSTITUTE: 'jp.anthropic.claude-sonnet-4-6',
 } as const;
 
 /**
