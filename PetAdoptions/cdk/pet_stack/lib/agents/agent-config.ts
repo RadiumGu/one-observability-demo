@@ -55,8 +55,57 @@ export const TOKYO_MODEL_IDS = {
      * 选 Sonnet 而不是 Nova：`NUTRITION_MODEL_ID` / `ORCHESTRATOR_MODEL_ID`
      * 已经在用它，LlamaIndex bedrock_converse + 该模型在本部署里是**验证过**的
      * 组合；Nova 虽然也可调，但工具调用行为与 Claude 家族有差异，
-     * 故障处置时换族是额外风险。Haiku 恢复后可以切回（更省），
-     * 但切回前必须重跑上面那组直调验证。
+     * 故障处置时换族是额外风险。
+     *
+     * ## 2026-09-23 复核：Haiku 已恢复，但**决定留在 Sonnet**
+     *
+     * 直调实测 8/8 成功、p50 0.54s —— 那次 Bedrock 侧的
+     * ServiceUnavailableException 已平息。
+     *
+     * ⚠️ 判据说明：该模型的 `InvocationServerErrors` 指标近 12 小时无数据点，
+     * 但那**不能**当恢复证据 —— 已经切走之后没有调用，自然也没有错误。
+     * 「指标沉默」与「服务正常」是两件事。证据是直调。
+     *
+     * 不切回的理由：**Haiku 从来不是功能需求**。源码核过（2026-09-23）：
+     *
+     *   · `adoption_llamaindex/agent.py:9` 走通用 `BedrockConverse`，
+     *     模型只是构造参数（:76 `model=models.model_id("adoption")`）。
+     *   · 目录名 `adoption_llamaindex` 与上游注释 `# LlamaIndex on Llama 4`
+     *     容易让人以为「用 LlamaIndex 就得配 Llama 模型」——**不是**，
+     *     LlamaIndex 是框架，名字里的 Llama 只是历史命名。
+     *   · 搜过模型族特有能力（cache_point / anthropic_beta / thinking /
+     *     reasoning_effort / haiku）在 adoption_llamaindex 与 common 下
+     *     **零命中**。唯一的模型行为适配是 :63 `_NonStreamingBedrockConverse`
+     *     关掉工具调用流式，那是框架层通用规避，与模型族无关。
+     *
+     * 所以当初选 Haiku 的理由只有「够用且更省」（上游自己的分层注释是
+     * `tiered by task cost: capable models for reasoning only`，
+     * adoption 是检索组装型任务，不在 reasoning-heavy 那一档）。
+     *
+     * 而这次故障暴露了两层重试叠加会把单模型不可用放大成整条路径 60s 超时。
+     * 在那个放大器没修掉之前，模型这一环应该选更稳的那个：Sonnet 是本部署里
+     * 另外两个 agent 已在用、已验证的组合。省下的那点成本不值得再换一次故障。
+     *
+     * ## 为什么没上 Sonnet 5（2026-09-23 查过）
+     *
+     * `anthropic.claude-sonnet-5` 在东京确实可用，但**只有 global 配置**：
+     *
+     *     global.anthropic.claude-sonnet-5   ACTIVE，直调 8/8，p50 1.68s
+     *     jp.anthropic.claude-sonnet-5       不存在（ValidationException）
+     *     apac.anthropic.claude-sonnet-5     不存在
+     *
+     * jp 前缀最高到 4-6。而本文件全用 jp 前缀的理由是**数据留日本境内**，
+     * 两个 profile 的底层 ARN 把差别摆得很清楚：
+     *
+     *     jp.…sonnet-4-6   -> ap-northeast-1（东京）+ ap-northeast-3（大阪）
+     *                         两个都在日本，范围是**封闭**的
+     *     global.…sonnet-5 -> ap-northeast-1 +
+     *                         arn:aws:bedrock:::foundation-model/…
+     *                         ← **无区域 ARN**，可路由到 AWS 有容量的任意区域
+     *
+     * 所以升到 Sonnet 5 等于放弃 jp 前缀的数据驻留约束 —— 那是**合规取舍
+     * 而不是技术升级**，不由本文件单方面决定。等 `jp.anthropic.claude-sonnet-5`
+     * 上线即可无痛升级（改这一行就够）；在那之前保持 4-6。
      */
     ADOPTION_SUBSTITUTE: 'jp.anthropic.claude-sonnet-4-6',
 } as const;
