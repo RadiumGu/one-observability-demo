@@ -1,0 +1,79 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  韩国侧的 ECR 仓库 —— 只为「一次性回填现有镜像」而建。
+  部到 ap-northeast-2。
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 为什么需要这个栈:复制会自动建仓库,但回填不会
+#
+# 官方文档说目标 region 的仓库在**复制发生时**会被自动创建。但我们要做的是
+# 一次性回填 —— 直接往韩国 push 现有镜像(因为现有镜像不在复制范围内,
+# 见 09-ecr-replication.yaml 的说明)。
+#
+# 而 ECR **不会在 push 时自动建仓库**:仓库不存在时 push 直接报
+# RepositoryNotFoundException。所以回填之前必须先有仓库。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️ 仓库名里为什么带着 ap-northeast-1
+#
+# 官方文档:"The repository name will remain the same across Regions and
+# accounts when replication has occurred. Amazon ECR doesn't support changing
+# the repository name during replication."
+#
+# 源仓库叫 `cdk-hnb659fds-container-assets-926093770964-ap-northeast-1`
+# (那是 CDK bootstrap 的命名,`ap-northeast-1` 是名字的一部分,不是 region 参数),
+# 所以韩国侧也**必须**叫这个名字,否则复制过来的镜像和回填的镜像会落在
+# 两个不同的仓库里,而 deployment 里的镜像引用只认一个名字。
+#
+# 看着别扭,但改名会让复制直接失效。
+# ══════════════════════════════════════════════════════════════════════════════
+
+Parameters:
+  CdkAssetRepoName:
+    Type: String
+    Default: cdk-hnb659fds-container-assets-926093770964-ap-northeast-1
+    Description: 必须与东京侧同名 —— 复制不支持改名
+
+  NamedRepoName:
+    Type: String
+    Default: pet-adoptions-history
+    Description: pethistory 用的具名仓库
+
+Resources:
+  CdkAssetRepo:
+    Type: AWS::ECR::Repository
+    # 保留:回填进去的镜像是灾备能否起来的前提，
+    # 删栈时顺手删掉它等于悄悄废掉灾备能力。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref CdkAssetRepoName
+      # 内容哈希 tag 天然不会被覆盖，但显式设成 IMMUTABLE 能挡住
+      # 「同一个 tag 指向不同镜像」这种最难查的漂移。
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: false
+
+  NamedRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref NamedRepoName
+      # ⚠️ 这个仓库刻意用 MUTABLE：pethistory 的 deployment 引用的是
+      # `pet-adoptions-history:latest`（不是内容哈希），IMMUTABLE 会让
+      # 第二次推 latest 直接失败。
+      #
+      # 顺带记下这本身是个灾备隐患：latest 是可变 tag，
+      # 主备两侧的 latest 可能指向不同镜像而看不出来。
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: false
+
+Outputs:
+  CdkAssetRepoUri:
+    Value: !GetAtt CdkAssetRepo.RepositoryUri
+
+  NamedRepoUri:
+    Value: !GetAtt NamedRepo.RepositoryUri

@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  petsite 镜像的跨 region 复制 —— 东京(ap-northeast-1) → 韩国(ap-northeast-2)。
+
+  ⚠️ 这个栈必须部到**源 region**(ap-northeast-1),不是韩国。
+  ECR 的复制配置是 **registry 级**设置,属于源 registry 的属性。
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 为什么需要这个栈:这是灾备方案里最致命的一个洞
+#
+# 2026-09-24 读东京 PetSite 活集群发现:6 个业务服务里 5 个用的镜像是
+#
+#   926093770964.dkr.ecr.**ap-northeast-1**.amazonaws.com/
+#     cdk-hnb659fds-container-assets-926093770964-ap-northeast-1:<sha256>
+#
+# **镜像仓库和要灾备的那个 region 是同一个 region。** 东京挂了就拉不到镜像,
+# 于是韩国的节点扩起来了、数据库提升了,pod 却全都 ImagePullBackOff。
+# 之前记的「依赖跨 region 拉取」在真灾难场景下等于没有方案。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️ 这个栈**不能单独解决问题** —— 必读
+#
+# 官方文档(AmazonECR/latest/userguide/replication.html「Considerations」)原文:
+#
+#   "Only repository content pushed or restored to a repository after
+#    replication is configured is replicated. **Any preexisting content in a
+#    repository isn't replicated.**"
+#
+# 也就是说:这个栈只让**以后新推送**的镜像自动过去。现在 deployment 引用的
+# 那 7 个镜像(内容哈希 tag,早就推好了)一个都不会自动复制。
+# 必须另做一次性回填 —— 见 docs/runbooks/deployment-record.md 4.17 节。
+#
+# 把这两件事当成一件做,是这个功能最容易踩的坑:配完复制、看到「配置成功」,
+# 然后以为镜像已经在韩国了。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 另外三条从文档里读到的事实(都不是推测)
+#
+# 1. **目标 region 的仓库会被自动创建**,不用预建
+#    (不过一次性回填需要仓库已存在才能 push,所以 10-ecr-korea-repos.yaml
+#     仍然要先建 —— 那是给回填用的,不是给复制用的)
+# 2. **仓库名跨 region 保持一致,不支持改名**。所以韩国侧的仓库名里仍然带着
+#    `ap-northeast-1` 字样 —— 看着别扭,但那是硬约束,不是笔误
+# 3. 第一次配置复制时,ECR 会**自动创建一个服务关联角色**
+#    (AWSServiceRoleForECRReplication),不需要我们自己建
+#
+# 上限:全部规则合计最多 25 个目标、最多 25 条规则、每条规则最多 100 个过滤器
+# ══════════════════════════════════════════════════════════════════════════════
+
+Parameters:
+  DestinationRegion:
+    Type: String
+    Default: ap-northeast-2
+    Description: 复制目标 region(韩国灾备站点)
+
+  CdkAssetRepoPrefix:
+    Type: String
+    Default: cdk-hnb659fds-container-assets-926093770964-ap-northeast-1
+    Description: >
+      CDK asset 仓库名。6 个业务服务里 5 个从这里拉镜像,tag 是内容哈希。
+      名字里的 ap-northeast-1 是 CDK bootstrap 的命名,不是 region 参数。
+
+  NamedRepoPrefix:
+    Type: String
+    Default: pet-adoptions-history
+    Description: pethistory 用的具名仓库(唯一一个不走 CDK asset 仓库的)
+
+Resources:
+  # ⚠️ 这个资源是 registry 单例 —— 一个 region 的 registry 只能有一份复制配置。
+  # 如果账号里别处已经配过复制,这个栈会覆盖它。
+  # 部署前已核实:ap-northeast-1 的 registry 此前没有任何复制配置
+  # （describe-registry 返回 rules 为空数组）。
+  EcrReplication:
+    Type: AWS::ECR::ReplicationConfiguration
+    Properties:
+      ReplicationConfiguration:
+        Rules:
+          - Destinations:
+              - Region: !Ref DestinationRegion
+                # RegistryId 在 schema 里是**必填**（不是可选）。
+                # 同账号复制时填自己的账号 ID。
+                RegistryId: !Ref AWS::AccountId
+            # 刻意加过滤器而不是复制整个 registry：
+            # 那 11 个仓库里有 waggle-ai-*、translator-ws、yace-cloudwatch-exporter
+            # 等 petsite 切换用不到的东西，复制它们只是白花存储和跨 region 流量。
+            #
+            # FilterType 的枚举**只有** PREFIX_MATCH 一个值（查 CFN schema 得到，
+            # 不是从印象里写的）。
+            RepositoryFilters:
+              - Filter: !Ref CdkAssetRepoPrefix
+                FilterType: PREFIX_MATCH
+              - Filter: !Ref NamedRepoPrefix
+                FilterType: PREFIX_MATCH
+
+Outputs:
+  ReplicationConfiguredIn:
+    Description: 复制配置所在的 region（源 region，不是目标）
+    Value: !Ref AWS::Region
+
+  DestinationRegion:
+    Value: !Ref DestinationRegion
+
+  BackfillReminder:
+    Description: ⚠️ 现有镜像不会被复制，必须另做一次性回填
+    Value: 见 docs/runbooks/deployment-record.md 4.17 节

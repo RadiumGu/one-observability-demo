@@ -1,0 +1,151 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国灾备站点 —— 第三批:EKS。守夜灯形态:控制面常开,节点组期望容量 0。
+  控制面 endpoint 仅私有。依赖 01-network.yaml 的导出值。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 守夜灯的具体含义与主站的对照（主站数值是 2026-09-24 实测，不是从 CDK 读的）
+#
+#                    主站 ap-northeast-1          韩国 ap-northeast-2
+#   版本              1.35                        1.35（对齐）
+#   节点组数量         2（各钉一个 AZ）             1
+#   实例类型           t4g.xlarge                  t4g.xlarge（同规格，便于切换后承载同样负载）
+#   AmiType           AL2023_ARM_64_STANDARD      同（实测枚举值，不是猜的）
+#   min/desired/max   2 / 2 / 3                   **0 / 0 / 3**   ← 守夜灯
+#   endpoint 公网      true                        **false**
+#
+# 切换时的动作就是把 desired 从 0 提到 2（`update-nodegroup-config` 接受
+# scalingConfig 的在线修改）。⚠️ 但 instanceTypes **不能**原地改 ——
+# 那是替换操作，所以实例类型必须一次定对。
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: dr-korea-petsite
+
+  KubernetesVersion:
+    Type: String
+    Default: '1.35'
+    Description: 与主站 PetSite 集群对齐（实测 1.35）。
+
+  NodeInstanceType:
+    Type: String
+    Default: t4g.xlarge
+    Description: 与主站同规格。⚠️ 事后改它是**替换**节点组，不是在线调参。
+
+  NodeAmiType:
+    Type: String
+    Default: AL2023_ARM_64_STANDARD
+    Description: >
+      实测主站两个节点组用的就是这个值。t4g 是 ARM，必须用 ARM 的 AmiType ——
+      填 AL2023_x86_64_STANDARD 会让节点起不来。
+
+  NodeMaxSize:
+    Type: Number
+    Default: 3
+
+Resources:
+
+  # ── 控制面角色 ───────────────────────────────────────────────────────────
+  ClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: eks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+      Tags:
+        - { Key: Name, Value: dr-korea-eks-cluster-role }
+
+  # ── 节点角色 ─────────────────────────────────────────────────────────────
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        # 节点也走 SSM 管理 —— 无公网入站下这是唯一进得去的通道。
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - { Key: Name, Value: dr-korea-eks-node-role }
+
+  # ── 集群 ─────────────────────────────────────────────────────────────────
+  Cluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt ClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !ImportValue dr-korea-private-subnet-a
+          - !ImportValue dr-korea-private-subnet-c
+        # ⚠️ 这两行是「不暴露公网」在 EKS 上的落点。
+        # 公网 endpoint 关掉后，kubectl 只能从 VPC 内用 ——
+        # 走 Temporal 那台 EC2（经 SSM 进去），或将来的 worker。
+        EndpointPublicAccess: false
+        EndpointPrivateAccess: true
+      AccessConfig:
+        # API 模式而不是 aws-auth ConfigMap：ConfigMap 那套要 kubectl 才能改，
+        # 而公网 endpoint 关着的时候改 ConfigMap 本身就需要先能进去 —— 死锁。
+        # API 模式用 IAM 授权，从外面就能加人。
+        AuthenticationMode: API
+        BootstrapClusterCreatorAdminPermissions: true
+      Tags:
+        - { Key: Name, Value: !Ref ClusterName }
+        - { Key: Purpose, Value: petsite-pilot-light-dr }
+
+  # ── 节点组:守夜灯的核心就是这里的 0 ──────────────────────────────────────
+  Nodegroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref Cluster
+      NodegroupName: dr-korea-workers
+      NodeRole: !GetAtt NodeRole.Arn
+      Subnets:
+        - !ImportValue dr-korea-private-subnet-a
+        - !ImportValue dr-korea-private-subnet-c
+      InstanceTypes: [!Ref NodeInstanceType]
+      AmiType: !Ref NodeAmiType
+      CapacityType: ON_DEMAND
+      ScalingConfig:
+        # ★ 守夜灯：平时零节点，零 EC2 费用。
+        #   切换时 `aws eks update-nodegroup-config --scaling-config
+        #   minSize=2,desiredSize=2,maxSize=3`
+        MinSize: 0
+        DesiredSize: 0
+        MaxSize: !Ref NodeMaxSize
+      Tags:
+        Name: dr-korea-workers
+        Purpose: petsite-pilot-light-dr
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+    Export: { Name: dr-korea-eks-cluster-name }
+  ClusterEndpoint:
+    Description: 仅 VPC 内可达（公网 endpoint 已关）
+    Value: !GetAtt Cluster.Endpoint
+  ClusterSecurityGroupId:
+    Description: EKS 自建的集群安全组，节点与控制面通信用
+    Value: !GetAtt Cluster.ClusterSecurityGroupId
+  NodegroupName:
+    Value: !Ref Nodegroup
+  ScaleUpCommand:
+    Description: 切换时执行这条把节点拉起来
+    Value: !Sub >-
+      aws eks update-nodegroup-config --region ${AWS::Region}
+      --cluster-name ${Cluster} --nodegroup-name ${Nodegroup}
+      --scaling-config minSize=2,desiredSize=2,maxSize=${NodeMaxSize}

@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国灾备站点 — temporal-mcp 的 AgentCore Runtime 本体。
+
+  部署前提（顺序是硬的）：
+    1. dr-korea-agentcore-prereq 栈已建好（桶 / 角色 / 安全组）
+    2. 代码包已上传到桶里（runtime 在**创建时**就要读它）
+    3. dr-korea-temporal 栈的 Temporal 已在应答
+
+Parameters:
+  CodeS3Prefix:
+    Type: String
+    Default: temporal-mcp/temporal-mcp.zip
+    Description: 代码包在桶里的键
+
+  TemporalAddress:
+    Type: String
+    Default: http://10.20.1.125:7243
+    Description: >
+      Temporal HTTP API 地址。7243 是 HTTP API 的默认端口 ——
+      不是 8080（那是 Web UI），也不是 7233（那是 gRPC）。
+      这个私有 IP 是 dr-korea-temporal 栈那台实例的，实测应答过。
+
+  TemporalTools:
+    Type: String
+    Default: standard
+    AllowedValues: [essential, standard, all]
+    Description: >
+      暴露哪一档工具。默认 standard：essential 的 11 个不含 schedules，
+      而 DR 计划可能要用 Schedule 承载；all 的 36 个里有四个在本服务端
+      不适用（capabilities 缺 workflowPause / standaloneActivities）。
+
+Resources:
+
+  TemporalMcpRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: temporal_mcp
+      # 名字只允许字母数字下划线，不能有连字符 —— 参照实现叫
+      # graph_dependency_mcp（下划线）而不是 graph-dependency-mcp。
+
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Code:
+            S3:
+              Bucket:
+                Fn::ImportValue: dr-korea-agentcore-bucket
+              Prefix: !Ref CodeS3Prefix
+          # NODE_22：实测查服务模型确认的枚举值，与本机 node v22 对齐。
+          Runtime: NODE_22
+          # ⚠️ entryPoint 是 **.js 的相对路径，没有 node 前缀**。
+          # 官方文档的例子是 ["dist/app.js"] / ["app.js"]，
+          # 活的 Python runtime 用的是 ["main.py"]（也没有 python 前缀）。
+          # 包里是平铺的，所以就是文件名本身。
+          EntryPoint:
+            - agentcore-http.js
+
+      RoleArn:
+        Fn::ImportValue: dr-korea-agentcore-role-arn
+
+      # ⚠️ CFN 把这个字段**扁平化成字符串枚举**了。
+      # API 那边是 protocolConfiguration: { serverProtocol: "MCP" } 的对象，
+      # CFN 这边直接是 ProtocolConfiguration: MCP。
+      # 查 describe-type 的 schema 确认的，按 API 的形状写会报错。
+      ProtocolConfiguration: MCP
+
+      NetworkConfiguration:
+        NetworkMode: VPC
+        NetworkModeConfig:
+          # 放在两个私有子网里，跨可用区。子网的默认路由指向 NAT，
+          # 所以出站 HTTPS（日志 / X-Ray / S3）走 NAT。
+          Subnets:
+            - Fn::ImportValue: dr-korea-private-subnet-a
+            - Fn::ImportValue: dr-korea-private-subnet-c
+          SecurityGroups:
+            - Fn::ImportValue: dr-korea-agentcore-sg
+
+      EnvironmentVariables:
+        TEMPORAL_ADDRESS: !Ref TemporalAddress
+        TEMPORAL_TOOLS: !Ref TemporalTools
+        AWS_DEFAULT_REGION: !Ref AWS::Region
+        LOG_LEVEL: INFO
+        # PORT 不设：传输层默认 8000，正是 AgentCore 的 MCP 契约要求的端口。
+        # 写死在这里反而多一处可能与契约不一致的地方。
+
+      # ⚠️ 刻意**不配** AuthorizerConfiguration。
+      #
+      # 参照实现（graph_dependency_mcp）用的是 Cognito 的 customJWTAuthorizer。
+      # 而这个字段不是必填（查服务模型：required 只有 name / artifact / roleArn）。
+      # 省掉它，调用方就用 IAM（SigV4）调 InvokeAgentRuntime ——
+      # 这对本用途更合适：调用方是带 AWS 凭证的 dr-plan-generator，
+      # 不是需要走 OAuth 的人类用户。少一个 Cognito 用户池要维护。
+
+      Tags:
+        Project: petsite-dr
+        Region: korea
+        Stage: pilot-light
+
+Outputs:
+  RuntimeArn:
+    Value: !GetAtt TemporalMcpRuntime.AgentRuntimeArn
+    Export:
+      Name: dr-korea-temporal-mcp-runtime-arn
+
+  RuntimeId:
+    Value: !GetAtt TemporalMcpRuntime.AgentRuntimeId
+
+  VerifyCommand:
+    Description: 核实用（与部署手段不同：查状态而非看 CFN 是否成功）
+    Value: !Sub |
+      aws bedrock-agentcore-control get-agent-runtime --region ${AWS::Region} \
+        --agent-runtime-id <RuntimeId> --query '{s:status,net:networkConfiguration,rt:agentRuntimeArtifact}'
+
+  InvokeNote:
+    Description: 调用方式（无 authorizer，走 IAM SigV4）
+    Value: >
+      aws bedrock-agentcore invoke-agent-runtime --agent-runtime-arn <arn>
+      --payload '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'

@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国灾备站点 —— 第四批:Aurora 全局数据库的韩国从集群(db.serverless)。
+  依赖 01-network.yaml,以及**先用 CLI 建好的全局集群**(见下)。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ 全局集群刻意**不用 CloudFormation**建,而用 CLI。理由:
+#
+# 主站集群 serviceseks2-databaseb269d8bb-efjeyzicx2ak 属于 petsite 的 CDK 栈。
+# `AWS::RDS::GlobalCluster` 有 SourceDBClusterIdentifier 属性，语法上能把它
+# 「收养」进我的栈 —— 但那样一来，**删我的栈时 CFN 会去处置一个不属于它的
+# 生产集群**，语义不可控。
+#
+# 所以分工:
+#     全局集群（包住生产主集群）      → CLI 一次性操作，记录在部署档案里
+#     韩国从集群（完全属于灾备侧）    → 本模板管
+#
+# 本栈删除时只会删掉韩国从集群，不会碰主站。这是刻意的边界。
+#
+# ── 前置的 CLI 步骤（参数名已用 botocore 服务模型核实，不是猜的）──────────
+#
+#   aws rds create-global-cluster \
+#     --global-cluster-identifier petsite-global \
+#     --source-db-cluster-identifier \
+#       arn:aws:rds:ap-northeast-1:926093770964:cluster:serviceseks2-databaseb269d8bb-efjeyzicx2ak
+#
+#   注意:指定 --source-db-cluster-identifier 时**不要**再传 --engine /
+#   --engine-version / --storage-encrypted —— 那些从源集群继承。
+#
+#   核实（用与执行不同的手段）:
+#     aws rds describe-global-clusters --global-cluster-identifier petsite-global \
+#       --query 'GlobalClusters[0].GlobalClusterMembers'
+#     → 应看到主集群 ARN 且 IsWriter=true
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  GlobalClusterId:
+    Type: String
+    Default: petsite-global
+    Description: 必须是上面 CLI 步骤已建好的全局集群 ID。
+
+  EngineVersion:
+    Type: String
+    Default: '16.11'
+    Description: >
+      必须与主站一致（实测主站是 aurora-postgresql 16.11）。
+      版本不一致会被拒 —— 全局数据库要求各成员同版本。
+
+  MinCapacity:
+    Type: Number
+    Default: 0.5
+    Description: >
+      韩国从集群的 ACU 下限。用户要求「较小的实例」——
+      Serverless v2 让这件事成立（主站是 1，这里 0.5）。
+      ⚠️ AWS 对全局数据库建议的 8 ACU 只适用于**主** region，从集群不受此建议约束。
+
+  MaxCapacity:
+    Type: Number
+    Default: 4.0
+    Description: 与主站上限一致，保证切换后能承载同等负载。
+
+Resources:
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: dr-korea Aurora (private subnets only)
+      SubnetIds:
+        - !ImportValue dr-korea-private-subnet-a
+        - !ImportValue dr-korea-private-subnet-c
+      Tags:
+        - { Key: Name, Value: dr-korea-db-subnet-group }
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dr-korea Aurora (PostgreSQL from inside the VPC only)
+      VpcId: !ImportValue dr-korea-vpc-id
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: !ImportValue dr-korea-vpc-cidr
+          Description: PostgreSQL from inside the VPC only - no public ingress
+      Tags:
+        - { Key: Name, Value: dr-korea-sg-aurora }
+
+  SecondaryCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      Engine: aurora-postgresql
+      EngineVersion: !Ref EngineVersion
+      # 挂进全局数据库 —— 这一行让它成为从集群（只读，跟随主集群复制）。
+      GlobalClusterIdentifier: !Ref GlobalClusterId
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VpcSecurityGroupIds: [!Ref DbSecurityGroup]
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+      # ⚠️ 刻意**不设** MasterUsername / MasterUserPassword / DatabaseName：
+      # 从集群的这些都从全局数据库继承。传了会被拒。
+      #
+      # ⚠️ 也不设 BackupRetentionPeriod —— 用户明确要求主站保持 1 天，
+      # 从集群这边不去改变它的语义。
+      EnableCloudwatchLogsExports: [postgresql]
+      Tags:
+        - { Key: Name, Value: dr-korea-aurora-secondary }
+        - { Key: Purpose, Value: petsite-pilot-light-dr }
+
+  # 从集群也需要至少一个实例才能真正接收复制并可读。
+  SecondaryInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref SecondaryCluster
+      Engine: aurora-postgresql
+      # Serverless v2 的实例类总是这个字面量 —— 容量由集群的
+      # ServerlessV2ScalingConfiguration 控制，不在实例上配。
+      DBInstanceClass: db.serverless
+      # 不可公网访问。这是「零公网入站」在数据库上的落点。
+      PubliclyAccessible: false
+      Tags:
+        - { Key: Name, Value: dr-korea-aurora-secondary-instance }
+
+Outputs:
+  SecondaryClusterId:
+    Value: !Ref SecondaryCluster
+    Export: { Name: dr-korea-aurora-cluster-id }
+  ReaderEndpoint:
+    Description: 从集群是只读的 —— 切换前只能读
+    Value: !GetAtt SecondaryCluster.ReadEndpoint.Address
+  DbSecurityGroupId:
+    Value: !Ref DbSecurityGroup
+    Export: { Name: dr-korea-aurora-sg }
+  FailoverCommand:
+    Description: >
+      切换时把韩国提升为主。⚠️ 这是**有损**操作的对立面:
+      failover-global-cluster 是有序切换（主站可用时用它，无数据丢失）;
+      主站已不可用时要用 --allow-data-loss 的 switchover/failover 变体，
+      那会丢掉未复制完的写入。阶段 D 的 workflow 必须把两者区分开，
+      并且让「用哪个」成为需人工 signal 放行的决策点。
+    Value: !Sub >-
+      aws rds failover-global-cluster --global-cluster-identifier ${GlobalClusterId}
+      --target-db-cluster-identifier ${SecondaryCluster}

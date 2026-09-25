@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 让 DR worker 能只读查询 k8s 节点状态（独立成栈，不碰 03/07）
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 为什么需要这个栈
+#
+# 2026-09-24 的节点组扩容演练暴露了一个核实缺陷：`scale_up_nodegroup` 的
+# 核实是**数 EC2 实例**。那证明 ASG 扩容成功，**但不证明集群获得了可调度
+# 容量** —— 节点可能起来了却没成为 Ready。
+#
+# 对灾备切换来说这个差别极大：你可能有两台 EC2 和零个可调度节点，
+# 而切换步骤会报「verified=True」继续往下走。
+#
+# 集群 endpointPublicAccess=false，所以只能由 VPC 内的 worker 去查。
+# 而 AuthenticationMode=API 时，调 k8s API 需要**访问条目**——
+# 实测 Temporal 的实例角色不在条目列表里（只有 EKS 服务角色、节点角色、
+# 一个 IAM 用户），所以现在根本调不通。
+#
+# 为什么独立成栈而不是加进 03-eks.yaml：
+#   03 建的是集群与节点组。把访问授权混进去，以后想收回这条授权就得
+#   动那个栈 —— 而那个栈里有集群本体。边界与 07-worker-permissions.yaml
+#   同一个判断：不要为了改一样东西而让 CFN 有机会动旁边那样东西。
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: dr-korea-petsite
+
+  WorkerRoleArn:
+    Type: String
+    Default: arn:aws:iam::926093770964:role/dr-korea-temporal-TemporalRole-MbW4WYmjoR8J
+    Description: >
+      Temporal 实例角色的 ARN（worker 用它调 AWS 与 k8s API）。
+      ⚠️ 栈 02 重建后角色名会变，这里要跟着更新，否则表现是
+      k8s API 返回 401/403 —— 看起来像权限策略写错，而不像「条目指向了
+      一个已经不存在的角色」。
+
+  ClusterSecurityGroupId:
+    Type: String
+    Default: sg-0a97fe1c88704924f
+    Description: >
+      EKS 自己建的集群安全组（实测 describe-cluster 的
+      resourcesVpcConfig.clusterSecurityGroupId，也是私有 endpoint ENI 上
+      唯一挂着的组 —— 真正过滤流量的是 ENI 上的组，不是模板里另外定义的组）。
+      ⚠️ 集群重建后会变。
+
+  TemporalSecurityGroupId:
+    Type: String
+    Default: sg-07dc94b7e77b88757
+    Description: Temporal 实例所在的安全组（流量来源）
+
+Resources:
+
+  # ── 控制面 443 的入站 ────────────────────────────────────────────────────
+  #
+  # 2026-09-24 实测:光有访问条目还调不通。诊断结果:
+  #
+  #   DNS      ✅ 解析到 10.20.1.77 / 10.20.2.77（VPC 内的私有 endpoint ENI）
+  #   TCP 443  ❌ 超时
+  #
+  # `timed out` 而不是 `refused`，正是安全组静默丢包的形状。集群安全组
+  # 原有的入站规则只允许**来自自己**（srcSg = 它自身），所以 Temporal 实例
+  # 的流量进不来。
+  #
+  # 用独立的 SecurityGroupIngress 资源指向现有安全组，**不动 03-eks.yaml** ——
+  # 那个栈里有集群本体，为了加一条规则去动它不值得。
+  # 与 07 用 ManagedPolicy 挂到现有角色是同一个判断。
+  ControlPlaneIngressFromWorker:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      # 源是安全组而不是 CIDR：CIDR 会把整个子网段都放进来，
+      # 而这条授权只该给 Temporal 那台实例。
+      SourceSecurityGroupId: !Ref TemporalSecurityGroupId
+      # ASCII only —— EC2 的规则 Description 不接受非 ASCII（本任务实测踩过）。
+      Description: DR worker reads k8s node status via private API endpoint
+
+  # ── 访问条目 ─────────────────────────────────────────────────────────────
+  #
+  # type 用 STANDARD（默认）。节点用的是 EC2_LINUX —— 那种类型会把主体
+  # 映射成 system:node:{{EC2PrivateDNSName}} 并加入 system:nodes 组，
+  # 那是给 kubelet 的，不是给一个查询客户端的。这里给错类型的表现是
+  # 「能认证但权限对不上」，排查会绕远。
+  WorkerAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref ClusterName
+      PrincipalArn: !Ref WorkerRoleArn
+      Type: STANDARD
+      # ⚠️ 刻意**不用** AWS 托管的访问策略。理由是实测出来的:
+      #
+      #   AmazonEKSViewPolicy       实测 403 —— 它的资源表里**没有 nodes**
+      #                             （全是 namespace 内的资源）
+      #   AmazonEKSAdminViewPolicy  是 */* 的 get,list,watch，官方文档明确写着
+      #                             「包括 Kubernetes Secrets」
+      #
+      # 给一个只需要知道「节点 Ready 了没」的 worker 读全集群 Secret 不可接受 ——
+      # 切换后集群里会有 petsite 的真实凭据。
+      #
+      # 所以走**组 + 自定义 ClusterRole**：这里只把主体放进一个 k8s 组，
+      # 真正的权限由一个仅含 nodes 的 ClusterRole 给（见
+      # dr-plan-generator/worker/k8s-node-reader-rbac.yaml）。
+      #
+      # 为什么用组而不是 Username 绑定：访问条目的 username 是
+      #   arn:aws:sts::…:assumed-role/<role>/{{SessionName}}
+      # 而 SessionName 在运行时才定（实测是实例 ID）。绑到一个会变的用户名上
+      # 是绑不住的；组名是稳定的。
+      KubernetesGroups:
+        - dr-node-readers
+
+Outputs:
+  AccessEntryArn:
+    Value: !GetAtt WorkerAccessEntry.AccessEntryArn
+
+  WhatThisEnables:
+    Description: 这条授权让 worker 能做什么
+    Value: >
+      只读查询集群资源（节点、Pod、Deployment 等）。
+      用途是把「节点组扩容」的核实从「数 EC2 实例」升级为
+      「数 Ready 的 k8s 节点」—— 前者只证明 ASG 扩了，
+      后者才证明集群真有可调度容量。
+
+  StillCannot:
+    Description: 这条授权刻意不包含什么
+    Value: >
+      不能改任何 k8s 资源、不能读 Secret（未给 AmazonEKSSecretReaderPolicy）。
+      切换时若需要真的部署工作负载，那是另一条授权，要单独评估。
