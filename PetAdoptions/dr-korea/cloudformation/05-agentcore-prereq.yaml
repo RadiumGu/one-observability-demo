@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国灾备站点 — temporal-mcp 部到 AgentCore 所需的前置资源：
+  代码包 S3 桶、执行角色、runtime 用的安全组。
+
+  ## 为什么与 runtime 本体分成两个栈
+  #
+  # AgentCore 的 runtime 在**创建时**就要去 S3 读代码包。
+  # 所以顺序是硬的：桶要先存在 → zip 要先上传 → 才能建 runtime。
+  # 一个栈做不到这个顺序（CFN 不上传文件），硬塞进去要靠 Condition
+  # 分两次部署同一个栈，那比两个栈更难读。
+  #
+  # 拆开还有一个好处：拆站点时 runtime 栈可以单独删掉重建，
+  # 不会连带删掉装着代码包的桶。
+
+Parameters:
+  TemporalMcpPrefix:
+    Type: String
+    Default: temporal-mcp/
+    Description: 代码包在桶里的前缀（执行角色只被授权读这个前缀）
+
+Resources:
+
+  # ── 代码包桶 ────────────────────────────────────────────────────────────
+  #
+  # 私有、加密、禁公网访问。里面是 MCP server 的可执行代码 ——
+  # 能改这个桶的人等于能改 runtime 执行的代码，所以按代码制品对待。
+  CodeBucket:
+    Type: AWS::S3::Bucket
+    # Retain：删栈时保留。桶里是部署制品，误删会让 runtime 下次
+    # 滚动更新时拉不到代码。要清空请显式操作。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'dr-korea-agentcore-${AWS::AccountId}-${AWS::Region}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        # 开版本：代码包被覆盖后还能回到上一版，
+        # 这是 runtime 出问题时最快的回滚路径。
+        Status: Enabled
+
+  # ── runtime 的安全组 ───────────────────────────────────────────────────
+  #
+  # 只需要出站：runtime 主动连 VPC 内的 Temporal（10.20.1.125:7243）。
+  # 入站一条都不开 —— 调用方是 AgentCore 的 InvokeAgentRuntime API，
+  # 走的是平台自己的通路，不是从 VPC 里打进来的。
+  #
+  # ⚠️ Temporal 那个安全组（sg-07dc94b7e77b88757）的入站放的是
+  # 10.20.0.0/16 整个 VPC 段，所以本安全组无需被显式放行 ——
+  # 实测确认过，不是推测。
+  RuntimeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      # GroupDescription / 规则 Description 必须是纯 ASCII ——
+      # 实测报错 "Character sets beyond ASCII are not supported"。
+      # 中文解释一律留在注释里，注释不会送到 API。
+      GroupDescription: temporal-mcp AgentCore runtime - egress only
+      VpcId:
+        Fn::ImportValue: dr-korea-vpc-id
+      SecurityGroupEgress:
+          # Temporal HTTP API。gRPC 的 7233 不需要 —— MCP 走 HTTP。
+        - Description: Temporal HTTP API
+          IpProtocol: tcp
+          FromPort: 7243
+          ToPort: 7243
+          CidrIp:
+            Fn::ImportValue: dr-korea-vpc-cidr
+          # HTTPS 出站：日志、X-Ray、S3 读代码包。
+        - Description: HTTPS for AWS APIs
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: dr-korea-temporal-mcp-runtime
+
+  # ── 执行角色 ───────────────────────────────────────────────────────────
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'DrKoreaTemporalMcpRole-${AWS::Region}'
+      # IAM 的 Description 同样只接受 ASCII。
+      Description: temporal-mcp on AgentCore (ap-northeast-2 DR site)
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AgentCoreRuntimeAssume
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            # 两个条件都是防「混淆代理」：没有它们，任何账号的
+            # AgentCore 资源都能让本角色被扮演。照参照实现
+            # （GraphDpMcpAgentCoreRole，已 READY）的形状写。
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: TemporalMcpLeastPrivilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # VPC 模式必须能管自己的 ENI。这些 ec2 动作不支持
+              # 资源级限定，只能用 * —— 不是偷懒。
+              - Sid: VpcEniForVpcMode
+                Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                Resource: '*'
+
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*'
+
+              - Sid: ObservabilityTraces
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+
+              # 只读自己那个前缀下的代码包。
+              - Sid: ReadDeploymentPackage
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub '${CodeBucket.Arn}/${TemporalMcpPrefix}*'
+
+              # ⚠️ 刻意**没有**任何数据面权限。
+              #
+              # 参照实现（graph_dependency_mcp）需要 neptune-db:ReadDataViaQuery，
+              # 因为它的数据源是 Neptune。而 temporal-mcp 的数据面是
+              # 「HTTP 打 VPC 内的 Temporal」 —— 那不是 AWS API，
+              # 不经过 IAM，所以这里一条数据面权限都不需要。
+              #
+              # 将来阶段 D 的 worker 要真的执行切换步骤（改 EKS 节点组、
+              # 提升数据库）时才需要写权限，而那些权限属于 worker 的角色，
+              # 不属于这个只做「查询/启动 workflow」的 MCP server。
+
+Outputs:
+  CodeBucketName:
+    Value: !Ref CodeBucket
+    Export:
+      Name: dr-korea-agentcore-bucket
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+    Export:
+      Name: dr-korea-agentcore-role-arn
+  RuntimeSgId:
+    Value: !Ref RuntimeSg
+    Export:
+      Name: dr-korea-agentcore-sg
+  UploadCommand:
+    Description: 建 runtime 之前必须先上传代码包
+    Value: !Sub |
+      npx tsup --config tsup.agentcore.config.ts && \
+      cd dist-agentcore && zip -q pkg.zip agentcore-http.js package.json && \
+      aws s3 cp pkg.zip s3://${CodeBucket}/${TemporalMcpPrefix}temporal-mcp.zip --region ${AWS::Region}

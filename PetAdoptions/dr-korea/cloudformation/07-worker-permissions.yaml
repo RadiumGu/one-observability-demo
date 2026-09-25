@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DR worker 的增量权限（独立成栈，刻意不改 02-temporal.yaml）
+
+# DR worker 的增量权限 —— 独立成栈，刻意不改 02-temporal.yaml。
+#
+# ## 为什么不直接加到 02-temporal.yaml 里
+#
+# 2026-09-24 实测发现的地雷：**线上栈的 UserData 与模板已经不一致。**
+#
+# 本会话早期修过 02 的 UserData（口令被 `set -x` 打进日志那处包进
+# `set +x`；镜像 tag 从编造的 1.29.0/2.42.0 改成真实存在的 1.29.7/2.54.1），
+# 但当时是用 SSM 直接修活实例，**栈从未重新部署**。
+#
+# 于是现在对 02 做任何 deploy，变更集都会报：
+#
+# TemporalInstance  AWS::EC2::Instance  Modify  Replacement: Conditional
+# Target: UserData   RequiresRecreation: Conditionally
+#
+# 而那台实例上跑着 Temporal 的 PostgreSQL 容器和 DR worker ——
+# 被替换等于数据和服务一起没了。所以只要 UserData 的漂移没处理掉，
+# 02 这个栈就不能碰。
+#
+# ## 这个栈怎么绕开
+#
+# `AWS::IAM::ManagedPolicy` 的 `Roles` 收的是角色**名字**，所以本栈可以
+# 把策略挂到一个它并不拥有的角色上，完全不触碰 02 的任何资源。
+# 删本栈只会摘掉这条策略。
+#
+# 这与「全局数据库用 CLI 而不是 CFN」是同一个判断：
+# **不要让一个栈去处置不属于它的东西**，反过来也不要为了改一样东西
+# 而让 CFN 有机会重建旁边那样东西。
+
+Parameters:
+  TemporalRoleName:
+    Type: String
+    Default: dr-korea-temporal-TemporalRole-MbW4WYmjoR8J
+    Description: >
+      02-temporal.yaml 建出来的实例角色名（实测取到的物理 ID，不是猜的）。
+      换栈重建后这个名字会变，要重新取。
+
+  PlanBucket:
+    Type: String
+    Default: dr-korea-agentcore-926093770964-ap-northeast-2
+    Description: 计划正文所在的桶（与 temporal-mcp 代码包同桶，不同前缀）
+
+  NodegroupArn:
+    Type: String
+    Default: arn:aws:eks:ap-northeast-2:926093770964:nodegroup/dr-korea-petsite/dr-korea-workers/4ad06992-7957-b47d-7adf-72656f7ffdf0
+    Description: >
+      守夜灯节点组的 ARN（实测取到的，含 EKS 自己生成的 UUID 段）。
+      ⚠️ 节点组重建后这个 UUID 会变，权限会静默失效 ——
+      那时的表现是 AccessDenied 而不是「找不到节点组」，
+      排查时容易误以为是策略写错。重建节点组后要重新取这个值。
+
+Resources:
+
+  WorkerReadPlans:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: DrKoreaWorkerReadPlans
+      # ASCII only —— IAM 的 Description 不接受非 ASCII（本会话实测踩过）。
+      Description: Read DR plan bodies from S3 for the Temporal DR worker
+      Roles:
+        - !Ref TemporalRoleName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+
+          # ── 为什么计划正文在 S3 而不在 workflow 里 ──────────────────
+          #
+          # 本服务端 workflowExecutionRetentionTtl = 86400s（实测）。
+          # 把正文塞进 workflow 的 input，一天后随历史一起被清掉，
+          # 而灾备计划要活几个月。而且 payload 上限拿不到 ——
+          # describe_namespace 的 namespaceInfo 里没有 limits 字段
+          # （实测推翻了「查 blobSizeLimitError」这个假设）。
+          #
+          # 所以 workflow 只带引用，正文另存。
+          - Sid: ReadDrPlanBodies
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            # 只给 plans/ 前缀。同一个桶里另一个前缀放的是 temporal-mcp
+            # 的可执行代码包 —— worker 没有任何理由读它，更没理由写。
+            Resource: !Sub 'arn:aws:s3:::${PlanBucket}/plans/*'
+
+          # ── 2026-09-24：worker 自己的代码也从 S3 取 ──────────────────
+          #
+          # 原来 /opt/dr-worker 是用 SSM 手工装的，不在 IaC 里。重启能保留，
+          # 但**实例真被重建时它不会自动回来** —— 而 worker 不在时，切换
+          # workflow 会一直排队并且**看起来是 RUNNING**（实测过），不报任何错。
+          # 那是最糟的失效形态，所以 provisioning 必须进 IaC。
+          #
+          # 仍然只给读。worker 没有理由写自己的代码 —— 能写代码就等于
+          # 能改变自己下一次启动后的行为。
+          - Sid: ReadWorkerCode
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${PlanBucket}/worker/*'
+
+          # ListBucket 是必需的，而且理由不是「方便」：
+          #
+          # 没有 ListBucket 时，HeadObject 对**不存在**的对象回 403 而不是
+          # 404 —— 那会让「计划不存在」和「没有权限」两种状态在返回码上
+          # 无法区分。本项目的立场是这类情况一律要能区分，否则
+          # 排查的人只能猜。
+          #
+          # 限定 prefix 条件，避免顺带获得整桶的列举能力。
+          - Sid: ListOnlyPlansPrefix
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !Sub 'arn:aws:s3:::${PlanBucket}'
+            Condition:
+              StringLike:
+                # 两个前缀都要列：plans/ 是计划正文，worker/ 是 worker 自己的
+                # 代码（aws s3 sync 要先列出目录才知道下载什么）。
+                's3:prefix':
+                  - 'plans/*'
+                  - 'worker/*'
+
+          # ── 2026-09-24：第一条写权限 ────────────────────────────────
+          #
+          # 「按步骤逐个放开」的第一步。给的是拉起节点组这一条，
+          # 因为它是切换里**最可逆**的动作：数错了把 desiredSize 改回去
+          # 就行，不像数据库提升那样一旦丢数据就没法回头。
+          #
+          # 限定到这一个节点组的 ARN，而不是整个集群 —— 主站的节点组在
+          # 另一个 region，但把 Resource 写成 * 意味着以后任何新节点组
+          # 都自动落进这个角色的能力范围，那是在没有需求时先开口子。
+          #
+          # 只给 UpdateNodegroupConfig，**不给** UpdateNodegroupVersion
+          # （那会滚动替换节点）、不给 DeleteNodegroup、不给 CreateNodegroup。
+          # 切换需要的只是改 scalingConfig。
+          # ── ASG 生命周期读取 ────────────────────────────────────────────
+          #
+          # 为什么需要:缩容核实**不能看 EC2 的 State**。2026-09-24 实测:
+          #
+          #     ASG LifecycleState:  Terminating:Wait   ← 真相
+          #     EC2 State:           running            ← 这一层分不出来
+          #
+          # 节点组的排空钩子 Terminate-LC-Hook 的 HeartbeatTimeout=1800
+          # (30 分钟)、DefaultResult=CONTINUE,所以一台正在优雅排空的实例
+          # 和一台缩容失败卡住的实例,在 EC2 那一层长得完全一样。
+          #
+          # ⚠️ 为什么 Resource 是 *:这不是放宽标准,是这个 action 的**硬约束**。
+          # 服务授权参考(list_autoscaling.html 的 Actions 表)里
+          # DescribeAutoScalingGroups 的「资源类型」列是**空的**,
+          # 也没有任何 condition key —— 对比同页的 DeleteAutoScalingGroup
+          # 是 autoScalingGroup*。空列意味着不支持资源级权限,只能写 *。
+          #
+          # 风险边界:它是 List 级、纯读,泄露的是本账号本 region 的 ASG 拓扑,
+          # 不含凭据也不能改任何东西。
+          - Sid: ReadAsgLifecycleState
+            Effect: Allow
+            Action:
+              - autoscaling:DescribeAutoScalingGroups
+            Resource: '*'
+
+          - Sid: ScaleUpPilotLightNodegroup
+            Effect: Allow
+            Action:
+              - eks:UpdateNodegroupConfig
+            Resource: !Ref NodegroupArn
+
+          # ⚠️ 仍然**没有**给的写权限，以及为什么：
+          #
+          #   rds:FailoverGlobalCluster        会丢数据的那个变体必须由人裁决，
+          #                                    workflow 已把它做成 signal 放行点。
+          #                                    权限留到那条链路演练过再给。
+          #   elasticloadbalancing:*           建入口会改变暴露面，要先问。
+          #   route53:ChangeResourceRecordSets DNS 切换影响所有流量，最后给。
+          #
+          # 这个顺序不是保守，而是「每放一条都要能单独演练并回滚」。
+
+Outputs:
+  PolicyArn:
+    Value: !Ref WorkerReadPlans
+
+  VerifyCommand:
+    Description: 核实用（与部署不同的手段：从实例上真读一次）
+    Value: !Sub >
+      aws ssm send-command --region ${AWS::Region} --instance-ids <id>
+      --document-name AWS-RunShellScript
+      --parameters 'commands=["aws s3 ls s3://${PlanBucket}/plans/ --region ${AWS::Region}"]'
+
+  StillMissingForRealFailover:
+    Description: 真切换还缺的写权限（刻意未给）
+    Value: >
+      eks:UpdateNodegroupConfig, rds:FailoverGlobalCluster,
+      elasticloadbalancing:*, route53:ChangeResourceRecordSets
+      —— 按步骤逐个放开；FailoverGlobalCluster 的有序 vs allow-data-loss
+      必须是需 signal 放行的决策点

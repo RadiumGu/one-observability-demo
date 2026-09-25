@@ -1,0 +1,56 @@
+# k8s-node-reader-rbac.yaml —— 让 DR worker 只能读节点状态的最小 RBAC。
+#
+# ## 为什么不用 AWS 托管的访问策略
+#
+# 2026-09-24 实测:
+#
+#   AmazonEKSViewPolicy       403 —— 它的资源表里**没有 nodes**
+#                             （官方文档的表格里全是 namespace 内的资源）
+#   AmazonEKSAdminViewPolicy  是 */* 的 get,list,watch，官方文档明确写着
+#                             「Note this includes Kubernetes Secrets」
+#
+# 给一个只需要知道「节点 Ready 了没」的 worker 读全集群 Secret 不可接受 ——
+# 切换后那个集群里会有 petsite 的真实凭据。所以自己写一个只含 nodes 的角色。
+#
+# ## 为什么绑到组而不是用户
+#
+# 访问条目的 username 是 `arn:aws:sts::…:assumed-role/<role>/{{SessionName}}`，
+# 而 SessionName 运行时才定（实测是实例 ID）。绑到一个会变的用户名上绑不住；
+# 组名是稳定的，所以 08-worker-k8s-readonly.yaml 里把主体放进 dr-node-readers。
+#
+# ## 怎么应用
+#
+# 需要 cluster-admin，且集群 endpoint 是私有的 —— 所以要从 VPC 内的机器上
+# 用一个有 AmazonEKSClusterAdminPolicy 的身份 POST 到 k8s API。
+# 不需要 kubectl:`aws eks get-token` 出 bearer token，再 curl 即可。
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dr-node-reader
+rules:
+  # 只有 nodes，只有读。
+  #
+  # 刻意不给 pods —— 「有没有可调度容量」看节点的 Ready 条件就够了，
+  # 而 pods 的 spec 里常带环境变量名之类的信息。
+  #
+  # 刻意不给 watch —— 一次性查询不需要长连接，而 watch 会让一个只读身份
+  # 能长期占着 API server 的连接。
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dr-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dr-node-reader
+subjects:
+  # 组名要与 08-worker-k8s-readonly.yaml 里 KubernetesGroups 的值一致。
+  # 不一致的表现是 403 —— 看起来像 ClusterRole 写错，而不像「组名对不上」。
+  - kind: Group
+    name: dr-node-readers
+    apiGroup: rbac.authorization.k8s.io

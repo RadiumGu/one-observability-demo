@@ -1,0 +1,304 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国灾备站点 —— 第二批:Temporal 服务端(t4g.large,私有子网,无公网 IP)。
+  依赖 01-network.yaml 的导出值。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 为什么 Temporal 放在灾备 region 而不是主站
+#
+# Temporal 要执行的正是「从 ap-northeast-1 切到 ap-northeast-2」这件事。
+# 把编排者放在主站,等于让灭火器和火在同一个房间。
+#
+# 同理 temporal-mcp 也部到 ap-northeast-2 的 AgentCore ——
+# 同 region 免去跨 region 打通,且与「灾备站点要有 AgentCore」这条要求重合。
+#
+# ⚠️ HTTP API 端口是 7243,不是 8080。8080 是 Web UI。
+#    temporal-mcp 的 TEMPORAL_ADDRESS 要指向 7243。
+#    (temporal 仓库 docs/architecture/nexus.md:HTTP API 在官方 docker
+#     配置里默认开启,不需要额外开关。)
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t4g.large
+    Description: 用户指定。t4g.medium(4GiB)跑 Temporal + PostgreSQL 会紧。
+
+  LatestAl2023AmiArm:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: >
+      用 SSM 公共参数取 AMI，不写死 AMI ID ——
+      AMI ID 是 region + 时间的函数，写死的那一刻就开始过期。
+
+  TemporalVersion:
+    Type: String
+    Default: 1.29.7
+    Description: >
+      固定版本，不用 latest —— latest 会让两次部署得到不同的东西。
+      ⚠️ 这个值必须是 Docker Hub 上真实存在的 tag。
+      2026-09-24 我填过一个编造的 UI 版本(2.42.0)，部署直接失败在
+      `manifest unknown`。查法：
+      curl -s 'https://hub.docker.com/v2/repositories/temporalio/auto-setup/tags?page_size=12&ordering=last_updated'
+
+  TemporalUiVersion:
+    Type: String
+    Default: 2.54.1
+    Description: 同上，必须是真实 tag（temporalio/ui 的版本线与 server 不同步）。
+
+  ComposePluginVersion:
+    Type: String
+    Default: v2.40.0
+    Description: docker compose 插件；AL2023 的 dnf 源里没有可靠的 compose。
+
+  WorkerCodeBucket:
+    Type: String
+    Default: dr-korea-agentcore-926093770964-ap-northeast-2
+    Description: >
+      DR worker 的代码与 provisioning 脚本所在的桶（worker/ 前缀）。
+      与 temporal-mcp 的代码包同桶但不同前缀；实例角色只被授权读
+      plans/ 与 worker/ 两个前缀（见 07-worker-permissions.yaml）。
+Resources:
+
+  # ── 实例角色 ─────────────────────────────────────────────────────────────
+  TemporalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM Session Manager —— 这是无公网入站下**唯一**的管理通道。
+        # 实例刻意不配密钥对:有了 SSM 就不需要,而密钥对是一个要保管的秘密。
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        # ⚠️ 这里刻意**只给只读**。
+        #
+        # Temporal worker 最终需要「扩 EKS 节点组、提升 Aurora 从集群」这类
+        # 写权限,但那些权限的边界要等阶段 D 把 DR workflow 的步骤定下来
+        # 才知道该给哪些 —— 现在就给一个宽权限,等于在没有需求的时候先开口子。
+        #
+        # 先给只读,让 worker 能**读**两个 region 的状态(健康判断需要),
+        # 写权限在阶段 D 按实际步骤逐条追加。
+        - PolicyName: dr-orchestrator-readonly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:Describe*
+                  - eks:List*
+                  - rds:Describe*
+                  - ec2:Describe*
+                  - elasticloadbalancing:Describe*
+                  - cloudwatch:GetMetric*
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:DescribeAlarms
+                Resource: '*'
+      Tags:
+        - { Key: Name, Value: dr-korea-temporal-role }
+
+  TemporalInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref TemporalRole]
+
+  # ── 安全组 ───────────────────────────────────────────────────────────────
+  TemporalSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dr-korea Temporal server (VPC-internal only, no public ingress)
+      VpcId: !ImportValue dr-korea-vpc-id
+      SecurityGroupIngress:
+        # 三个端口都**只对 VPC 内**开放。没有任何 0.0.0.0/0 入站规则。
+        - IpProtocol: tcp
+          FromPort: 7233
+          ToPort: 7233
+          CidrIp: !ImportValue dr-korea-vpc-cidr
+          Description: Temporal gRPC (SDK/worker)
+        - IpProtocol: tcp
+          FromPort: 7243
+          ToPort: 7243
+          CidrIp: !ImportValue dr-korea-vpc-cidr
+          Description: Temporal HTTP API - this is what temporal-mcp connects to
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: !ImportValue dr-korea-vpc-cidr
+          Description: Temporal Web UI (VPC-internal; reach it via SSM port forwarding)
+      Tags:
+        - { Key: Name, Value: dr-korea-sg-temporal }
+
+  # ── 实例 ─────────────────────────────────────────────────────────────────
+  TemporalInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAl2023AmiArm
+      IamInstanceProfile: !Ref TemporalInstanceProfile
+      # KeyName 刻意不设 —— 管理走 SSM Session Manager。
+      SubnetId: !ImportValue dr-korea-private-subnet-a
+      SecurityGroupIds: [!Ref TemporalSg]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: dr-korea-temporal }
+        - { Key: Purpose, Value: dr-orchestrator }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/temporal-bootstrap.log) 2>&1
+
+          dnf -y update
+          dnf -y install docker
+          systemctl enable --now docker
+
+          # AL2023 的 dnf 源里没有可靠的 docker compose，从官方 release 装。
+          # 版本固定，不用 latest。
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL \
+            "https://github.com/docker/compose/releases/download/${ComposePluginVersion}/docker-compose-linux-aarch64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          mkdir -p /opt/temporal
+          # ⚠️ 这一段刻意关掉 set -x。
+          # 上面开了 `set -x` 且把输出 tee 到 /var/log/temporal-bootstrap.log，
+          # 所以任何在 trace 里出现的值都会落进那个日志文件。
+          # 2026-09-24 第一次部署就把 PostgreSQL 口令打进了日志 ——
+          # 生成秘密的代码段必须在 set +x 里。
+          set +x
+          # ⚠️ 幂等：只在 .env 不存在时才生成口令。
+          #
+          # 2026-09-24 加的。原来无条件生成，那有一个真实的破坏路径：
+          # PostgreSQL 的数据是 bind mount 到 /opt/temporal/pgdata 的（在 EBS
+          # 根卷上），一旦库已经用旧口令初始化过，再写一个新口令进 .env 就会
+          # 让 Temporal 连不上自己的库 —— 而且报的是认证失败，看起来像配置
+          # 写错而不像「口令被换了」。
+          #
+          # 触发条件不是假设：更新 UserData 时 CloudFormation 会**重启**这台
+          # 实例（根卷是 EBS；换成 instance store 才是替换）。cloud-init 的
+          # user-data 默认「每实例一次」所以重启不会重跑，但把安全性押在那个
+          # 语义上不值得 —— 一个 `[ -f ]` 就能让它无论跑几次都安全。
+          if [ ! -f /opt/temporal/.env ]; then
+            PGPW="$(openssl rand -hex 24)"
+            umask 077
+            printf 'POSTGRES_PASSWORD=%s\n' "$PGPW" > /opt/temporal/.env
+            chmod 600 /opt/temporal/.env
+            unset PGPW
+          fi
+          set -x
+
+          cat > /opt/temporal/docker-compose.yml <<'COMPOSEEOF'
+          services:
+            postgresql:
+              image: postgres:16-alpine
+              environment:
+                POSTGRES_USER: temporal
+                POSTGRES_PASSWORD: ${!POSTGRES_PASSWORD}
+              volumes:
+                - /opt/temporal/pgdata:/var/lib/postgresql/data
+              restart: unless-stopped
+
+            temporal:
+              image: temporalio/auto-setup:TEMPORAL_VER
+              depends_on: [postgresql]
+              environment:
+                DB: postgres12
+                DB_PORT: 5432
+                POSTGRES_USER: temporal
+                POSTGRES_PWD: ${!POSTGRES_PASSWORD}
+                POSTGRES_SEEDS: postgresql
+                # 绑 0.0.0.0 才能被同 VPC 的 AgentCore / worker 连到。
+                # 暴露面由安全组控制（只放 VPC CIDR），不靠绑定地址控制。
+                BIND_ON_IP: 0.0.0.0
+              ports:
+                - "7233:7233"   # gRPC
+                - "7243:7243"   # HTTP API  ← temporal-mcp 连这个
+              restart: unless-stopped
+
+            temporal-ui:
+              image: temporalio/ui:TEMPORAL_UI_VER
+              depends_on: [temporal]
+              environment:
+                TEMPORAL_ADDRESS: temporal:7233
+                TEMPORAL_CORS_ORIGINS: http://localhost:3000
+              ports:
+                - "8080:8080"
+              restart: unless-stopped
+          COMPOSEEOF
+
+          sed -i "s/TEMPORAL_VER/${TemporalVersion}/; s/TEMPORAL_UI_VER/${TemporalUiVersion}/" \
+            /opt/temporal/docker-compose.yml
+
+          cat > /etc/systemd/system/temporal.service <<'UNITEOF'
+          [Unit]
+          Description=Temporal server (docker compose)
+          Requires=docker.service
+          After=docker.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          # oneshot 的默认 TimeoutStartSec 是 90s，而首次要经 NAT 拉三个镜像
+          # （auto-setup 数百 MB）——90s 远不够，会被 systemd 杀掉。
+          TimeoutStartSec=900
+          WorkingDirectory=/opt/temporal
+          ExecStart=/usr/bin/docker compose up -d
+          ExecStop=/usr/bin/docker compose down
+
+          [Install]
+          WantedBy=multi-user.target
+          UNITEOF
+
+          systemctl daemon-reload
+          systemctl enable --now temporal.service
+
+          # ── 2026-09-24：把 DR worker 的 provisioning 接进来 ──────────────
+          #
+          # 为什么必须在 IaC 里：worker 最初是用 SSM 手工装的，重启能保留，
+          # 但**实例真被重建时它不会自动回来**。而 worker 不在时，切换
+          # workflow 会一直排队并且**看起来是 RUNNING**（实测过），
+          # 不报任何错 —— 那是最糟的失效形态。
+          #
+          # 顺序要紧：必须在 temporal.service 起来之后。脚本最后一步要查
+          # 「任务队列上有没有 poller」，那需要 Temporal 的 HTTP API 在应答。
+          #
+          # 脚本本身在 S3 上、**做成幂等**，所以：
+          #   - 首次启动由这里调用
+          #   - 活主机上出问题可以直接重跑同一个脚本修复
+          #   - 已实测跑两遍对健康主机零改动（服务启动时间不变）
+          #
+          # ⚠️ 这一步失败不让整个引导失败（|| true）。Temporal 本体已经起来了，
+          # 而 worker 缺失是可以事后补的；让引导整体失败反而会让 CFN 回滚掉
+          # 一台其实可用的 Temporal。失败会留在日志里。
+          echo "=== provisioning DR worker ==="
+          aws s3 cp "s3://${WorkerCodeBucket}/worker/provision-worker.sh" \
+            /opt/provision-worker.sh --region "${AWS::Region}" || true
+          chmod +x /opt/provision-worker.sh || true
+          DR_CODE_BUCKET="${WorkerCodeBucket}" DR_REGION="${AWS::Region}" \
+            bash /opt/provision-worker.sh || echo "worker provisioning 失败，见上方日志"
+
+          echo "bootstrap done"
+
+Outputs:
+  InstanceId:
+    Value: !Ref TemporalInstance
+  PrivateIp:
+    Description: Temporal 的私有 IP。TEMPORAL_ADDRESS 用 http://<这个>:7243
+    Value: !GetAtt TemporalInstance.PrivateIp
+  TemporalHttpApi:
+    Description: temporal-mcp 的 TEMPORAL_ADDRESS 应设为这个值
+    Value: !Sub 'http://${TemporalInstance.PrivateIp}:7243'
+  TemporalSgId:
+    Value: !Ref TemporalSg
+    Export: { Name: dr-korea-temporal-sg }

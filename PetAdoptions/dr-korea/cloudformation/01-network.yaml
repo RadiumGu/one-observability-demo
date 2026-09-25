@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  韩国(ap-northeast-2)守夜灯灾备站点 —— 第一批:网络。
+  工作负载零公网入站;出站经 NAT。SSM 端点让 NAT 拆掉后仍能管理实例。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠️ 关于「私有子网 + NAT」这个说法的更正
+#
+# 清单第一版写的是「私有子网 × 2 + NAT 网关」。那个描述不完整:
+# **NAT 网关必须落在公有子网**(它需要 IGW 路由才能出站)。
+#
+# 所以这里建三个子网:
+#     PublicSubnetNat   仅放 NAT 网关，**不放任何工作负载**
+#     PrivateSubnetA/C  工作负载(Temporal EC2 / 将来的 EKS 节点 / Aurora)
+#
+# 这不改变「工作负载零公网入站」的结论 —— 私有子网没有 IGW 路由,
+# 实例也不分配公网 IP。但公有子网确实存在,不该让清单读起来像是没有。
+#
+# ⚠️ NAT 网关本身有一个公网 EIP(出站用)。它不接受主动入站连接,
+# 但如果要求「韩国 region 不出现任何公网 IP」,就得去掉 NAT,
+# 改用 VPC 端点 + 预烘焙 AMI 的方式装 Temporal。用户已确认接受 NAT。
+# ─────────────────────────────────────────────────────────────────────────────
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+    Description: 刻意不用默认 VPC —— 默认 VPC 的子网都带 IGW 路由，做不到私有。
+
+Resources:
+
+  # ── VPC 与网关 ───────────────────────────────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      # DNS 主机名必须开 —— VPC 接口端点靠私有 DNS 生效,关掉端点就形同虚设。
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: dr-korea-vpc }
+        - { Key: Purpose, Value: petsite-pilot-light-dr }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: dr-korea-igw }
+
+  IgwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── 子网 ─────────────────────────────────────────────────────────────────
+  # AZ 用 Fn::Select 取，不写死 apne2-a/c —— region 内 AZ 名到物理机房的映射
+  # 因账号而异，写死没有意义；而且这份模板将来若要换 region 也不用改。
+  PublicSubnetNat:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 8]]   # 10.20.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      # false —— 这个子网只放 NAT 网关(它自带 EIP)，不需要自动分配公网 IP。
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: dr-korea-public-nat-only }
+        - { Key: Note, Value: "NAT gateway only - no workloads" }
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 8]]   # 10.20.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: dr-korea-private-a }
+        # EKS 要靠这个标签发现子网来放内部负载均衡器（第二批会用到）
+        - { Key: kubernetes.io/role/internal-elb, Value: '1' }
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 8]]   # 10.20.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - { Key: Name, Value: dr-korea-private-c }
+        - { Key: kubernetes.io/role/internal-elb, Value: '1' }
+
+  # ── NAT(仅出站)──────────────────────────────────────────────────────────
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - { Key: Name, Value: dr-korea-nat-eip }
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: IgwAttachment
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnetNat
+      Tags:
+        - { Key: Name, Value: dr-korea-nat }
+
+  # ── 路由 ─────────────────────────────────────────────────────────────────
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: dr-korea-rt-public }
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRtAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetNat
+      RouteTableId: !Ref PublicRouteTable
+
+  # 私有子网共用一张路由表:只有一个 NAT,分表没有意义,还会让「拆 NAT」
+  # 变成要改两处。单 NAT 是刻意的成本取舍 —— 它是单 AZ 故障点,
+  # 但灾备站点平时无流量,NAT 挂掉只影响出站(装软件/拉镜像),不影响切换后的服务。
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - { Key: Name, Value: dr-korea-rt-private }
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARtAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetCRtAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ── VPC 端点 ─────────────────────────────────────────────────────────────
+  # 为什么 NAT 和 SSM 端点都要:NAT 让实例能下载软件;SSM 端点让**管理通道**
+  # 不依赖 NAT。装完 Temporal 后可以删掉 NAT(省 ~41/月),实例仍可经 SSM 管理。
+  # 若只留 NAT 不要端点,拆 NAT 的那一刻就失去管理通道 —— 而实例没有公网 IP、
+  # 也没有密钥对,那时只能靠重建。
+  EndpointSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: dr-korea VPC interface endpoints (443 from VPC only)
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from inside the VPC only
+      Tags:
+        - { Key: Name, Value: dr-korea-sg-endpoints }
+
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetC]
+      SecurityGroupIds: [!Ref EndpointSg]
+
+  SsmMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssmmessages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetC]
+      SecurityGroupIds: [!Ref EndpointSg]
+
+  Ec2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ec2messages
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetC]
+      SecurityGroupIds: [!Ref EndpointSg]
+
+Outputs:
+  VpcId:
+    Value: !Ref Vpc
+    Export: { Name: dr-korea-vpc-id }
+  VpcCidr:
+    Value: !Ref VpcCidr
+    Export: { Name: dr-korea-vpc-cidr }
+  PrivateSubnetA:
+    Value: !Ref PrivateSubnetA
+    Export: { Name: dr-korea-private-subnet-a }
+  PrivateSubnetC:
+    Value: !Ref PrivateSubnetC
+    Export: { Name: dr-korea-private-subnet-c }
+  NatEipAddress:
+    Description: NAT 的公网 EIP —— 这是本站点唯一的公网 IP，仅用于出站
+    Value: !Ref NatEip

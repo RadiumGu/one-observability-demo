@@ -1,0 +1,10 @@
+# DR worker 的依赖。版本钉死 —— 切换流程不该因为某个依赖发了新版而改行为。
+#
+# temporalio 1.33.0：
+#   requires_python >=3.10（宿主系统 python3 是 3.9，所以并装了 3.12）
+#   轮子是 cp310-abi3，有 manylinux_2_17_aarch64 —— 本实例是 aarch64，实测可导入
+#   以上都是查 PyPI 的 JSON API 确认的，不是推断
+temporalio==1.33.0
+
+# boto3：activity 里调 AWS。纯 Python，无架构约束。
+boto3==1.40.47

@@ -1,0 +1,55 @@
+[Unit]
+# dr-worker.service —— 灾备切换 worker。
+#
+# ⚠️ 只在 Temporal 起来之后才有意义：worker 启动时会连 localhost:7233。
+# 连不上会退出，由 Restart 兜住 —— 但 After= 能少一次无谓的失败重启。
+Description=DR failover Temporal worker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dr-worker/app
+ExecStart=/opt/dr-worker/venv/bin/python /opt/dr-worker/app/worker.py
+
+# ── 环境（实测取到的真实资源名，不是占位符）────────────────────────────
+Environment=LOG_LEVEL=INFO
+# worker 走 gRPC 7233。⚠️ 不是 7243（HTTP API，temporal-mcp 用的），
+# 也不是 8080（Web UI）。
+Environment=DR_TEMPORAL_TARGET=localhost:7233
+Environment=DR_TEMPORAL_NAMESPACE=default
+# 必须与发起方一致。不一致的后果是 workflow 永远排队而**看起来是 RUNNING**。
+Environment=DR_TEMPORAL_TASK_QUEUE=dr-plan-queue
+Environment=DR_TARGET_REGION=ap-northeast-2
+Environment=DR_PRIMARY_REGION=ap-northeast-1
+Environment=DR_EKS_CLUSTER=dr-korea-petsite
+Environment=DR_EKS_NODEGROUP=dr-korea-workers
+Environment=DR_GLOBAL_CLUSTER=petsite-global
+Environment=DR_SECONDARY_CLUSTER_ARN=arn:aws:rds:ap-northeast-2:926093770964:cluster:dr-korea-aurora-secondarycluster-5ctcqnmbkro4
+Environment=DR_PLAN_BUCKET=dr-korea-agentcore-926093770964-ap-northeast-2
+
+# 重启：worker 掉了切换就没人执行，所以要拉起来。
+# 但不要疯狂重启 —— Temporal 没起来时每 15 秒试一次足够。
+Restart=always
+RestartSec=15
+
+# 优雅停止：让当前 activity 跑完。半途断开的后果是 Temporal 要等
+# activity 超时才重派，而切换过程中多等几分钟是有代价的。
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# ── 收紧权限面 ───────────────────────────────────────────────────────────
+# worker 只需要读自己的代码、连网、调 AWS。给它写整个文件系统没有理由。
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dr-worker
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
