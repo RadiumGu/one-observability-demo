@@ -19,6 +19,14 @@ Description: >
 # ─────────────────────────────────────────────────────────────────────────────
 
 Parameters:
+  PrivateIp:
+    Type: String
+    Default: 10.20.1.10
+    Description: >
+      Temporal 实例的固定私有 IP。⚠️ 这是 createOnly 属性 —— 改它会替换实例。
+      改了之后 06-agentcore-runtime.yaml 的 TEMPORAL_ADDRESS 必须跟着改，
+      否则 temporal-mcp 会连不上（而控制面仍显示 READY）。
+
   InstanceType:
     Type: String
     Default: t4g.large
@@ -142,6 +150,26 @@ Resources:
       # KeyName 刻意不设 —— 管理走 SSM Session Manager。
       SubnetId: !ImportValue dr-korea-private-subnet-a
       SecurityGroupIds: [!Ref TemporalSg]
+      # ── 固定私有 IP ────────────────────────────────────────────────────
+      #
+      # 为什么要固定:AgentCore runtime 的 TEMPORAL_ADDRESS 里写着这个地址
+      # (06-agentcore-runtime.yaml)。实例一旦被替换,IP 就变,而 AgentCore
+      # 那边不会自动跟着改 —— 表现是 temporal-mcp 的每次调用都连不上,
+      # 而控制面显示 READY、日志里也没有明显报错。
+      # (在此之前靠 scripts/check_dr_ip_coupling.py 兜住,那只是检测,不是消除。)
+      #
+      # ⚠️ 两件必须知道的事
+      #
+      # 1. `PrivateIpAddress` 在 CFN 的 createOnlyProperties 里 ——
+      #    把它写进模板**本身就要求替换实例**。
+      #
+      # 2. 选的是 10.20.1.10 而**不是**当时那台实例的 10.20.1.125。
+      #    原因:CFN 替换资源是**先建新再删旧**。如果这里写成旧实例正占着的
+      #    地址,新实例创建时会因地址被占用而失败 —— 而那个失败发生在
+      #    栈更新中途,回滚起来比一次干净的替换麻烦得多。
+      #    子网是 10.20.1.0/24(当时 245 个可用),.0~.3 与 .255 是 AWS 保留,
+      #    .10 当时空闲(逐个核对过 subnet 内所有 ENI)。
+      PrivateIpAddress: !Ref PrivateIp
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs:
