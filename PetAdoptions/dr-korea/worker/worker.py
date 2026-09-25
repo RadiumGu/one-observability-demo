@@ -3,7 +3,12 @@ worker.py — 灾备切换 worker 的入口。
 
 ## 跑在哪
 
-Temporal 服务端同一台 EC2(`i-06f0a3e4961b8061e`,ap-northeast-2)。
+Temporal 服务端同一台 EC2(ap-northeast-2,私有 IP 固定为 10.20.1.10)。
+
+⚠️ 这里刻意**不写实例 ID**:实例会被替换(2026-09-25 就替换过一次,
+`i-06f0a3e4961b8061e` → `i-09380e417a0177ed4`),写死 ID 的注释会变成
+误导人的过期事实。IP 是固定的(02-temporal.yaml 的 PrivateIpAddress),
+所以用 IP 指代更稳。
 2026-09-24 定的,备选是韩国 EKS 与东京 EKS,选这台的理由:
 
 1. **切换时 EKS 可能正是要被操作的对象。** worker 放在韩国 EKS 上,

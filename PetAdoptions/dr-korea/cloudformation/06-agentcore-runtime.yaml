@@ -15,7 +15,18 @@ Parameters:
 
   TemporalAddress:
     Type: String
-    Default: http://10.20.1.125:7243
+    Default: http://10.20.1.10:7243
+    # ⚠️ 2026-09-25：从 10.20.1.125 改到 10.20.1.10。
+    #
+    # 那次改动是「把 Temporal 实例的 PrivateIpAddress 固定进 02-temporal.yaml」
+    # 的一部分。在此之前这个地址是**随实例生命周期漂移**的：实例一被替换，
+    # 这里就过期，而过期的表现是 temporal-mcp 的每次调用都超时 ——
+    # 控制面显示 READY、日志里也没有明显报错。
+    #
+    # 现在 02 那边把 IP 钉死在 10.20.1.10，所以这个值不会再因重建而变。
+    # 但**它仍然是两个栈之间的手工耦合**：改了 02 的 PrivateIp 就必须改这里。
+    # scripts/check_dr_ip_coupling.py 就是为这条耦合写的（三态：ok / mismatch /
+    # inconclusive），它在这次替换后准确报出了 mismatch。
     Description: >
       Temporal HTTP API 地址。7243 是 HTTP API 的默认端口 ——
       不是 8080（那是 Web UI），也不是 7233（那是 gRPC）。

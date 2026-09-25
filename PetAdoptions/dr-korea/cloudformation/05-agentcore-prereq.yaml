@@ -49,7 +49,8 @@ Resources:
 
   # ── runtime 的安全组 ───────────────────────────────────────────────────
   #
-  # 只需要出站：runtime 主动连 VPC 内的 Temporal（10.20.1.125:7243）。
+  # 只需要出站：runtime 主动连 VPC 内的 Temporal（10.20.1.10:7243，
+  # 那个 IP 由 02-temporal.yaml 的 PrivateIpAddress 固定）。
   # 入站一条都不开 —— 调用方是 AgentCore 的 InvokeAgentRuntime API，
   # 走的是平台自己的通路，不是从 VPC 里打进来的。
   #
