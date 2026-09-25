@@ -34,6 +34,7 @@ worker/             跑在 Temporal 实例上的 Python worker + 幂等 provisio
 | `08-worker-k8s-readonly.yaml` | ap-northeast-2 | EKS AccessEntry + 控制面 443 窄入站 |
 | `09-ecr-replication.yaml` | **ap-northeast-1** | ECR 跨 region 复制 —— **配在源 region** |
 | `10-ecr-korea-repos.yaml` | ap-northeast-2 | 韩国侧 ECR 仓库(给一次性回填用) |
+| `11-irsa-korea-oidc.yaml` | 任意(IAM 是全局的) | 把韩国集群的 OIDC provider 注册进 IAM |
 
 ```bash
 # 示例（07 需要 NAMED_IAM，不是 IAM）
@@ -135,12 +136,34 @@ signal 才推进的决策点(`ordered` / `allow_data_loss` / `abort`),**超时�
 
 ---
 
+### ⑤ IRSA 的失效方式极其隐蔽(已修好,但值得单记)
+
+IRSA 的信任链需要 IAM 里**注册了集群的 OIDC provider**。韩国集群建好之后
+`list-open-id-connect-providers` 里一个 `ap-northeast-2` 都没有 ——
+清单照抄过去,pod **能起来**、能过健康检查前半段,然后每一次 AWS 调用都 403。
+**切换前做静态检查完全看不见。**
+
+修法见 `cloudformation/11-irsa-korea-oidc.yaml` 与
+`scripts/add_korea_irsa_trust.py`。两个要点:
+
+- **不要写死 thumbprint。** `CreateOpenIDConnectProvider` 的 required 只有
+  `['Url']`,AWS 会自己取。写死的值会随 CA 轮换而过期,**过期的表现也是 403**,
+  和「没注册」无法区分。
+- **信任策略不能用 CFN 改**(那些角色是别的栈建的),而
+  `UpdateAssumeRolePolicy` **替换整个文档** —— 脚本必须只追加、改前备份、
+  改后逐字核对原有语句还在。
+
+核实不需要起 pod:token 由控制面签发,所以零节点就能验 ——
+建 SA → TokenRequest(audience=`sts.amazonaws.com`)→
+`sts assume-role-with-web-identity`。双向都要验:换个别的 SA 必须被
+`AccessDenied` 拒掉,否则说明 `:sub` 没限制住。
+
+---
+
 ## 还没做完的(应用层接管)
 
 基础设施层是通的,但切换后 petsite 起不来,因为:
 
-- **IRSA**:7 个 `*-sa` 对应的 IAM 角色信任策略里只有东京集群的 OIDC provider。
-  清单照抄过去、pod 能起来,然后所有 AWS 调用 403 —— **只在真切换时才炸**。
 - **配置在 region 内**:SSM `/petstore` 前缀一批参数、Secrets Manager 的
   `DatabaseSecret…` 都在 `ap-northeast-1`。
 - **依赖面远超 EKS+DB**:DynamoDB 表、EventBridge bus、SQS、S3、API Gateway、

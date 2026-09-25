@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  把韩国灾备集群的 OIDC provider 注册进 IAM。
+  这是 IRSA 在韩国能工作的前提。
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 为什么需要这个栈:这是「只在真切换时才炸」的那一类缺陷
+#
+# petsite 的 7 个业务服务全都用 IRSA(ServiceAccount 上带
+# `eks.amazonaws.com/role-arn` 注解)。IRSA 的信任链是:
+#
+#   pod → ServiceAccount token(由**集群自己的** OIDC issuer 签发)
+#       → sts:AssumeRoleWithWebIdentity
+#       → IAM 校验签发者是否是一个**已注册的 OIDC provider**
+#
+# 2026-09-25 实测(`aws iam list-open-id-connect-providers`):
+#
+#   arn:…:oidc-provider/oidc.eks.ap-northeast-1.amazonaws.com/id/CEF4EC7D…
+#   arn:…:oidc-provider/oidc.eks.ap-northeast-1.amazonaws.com/id/D355BAF1…  ← 东京 PetSite
+#   arn:…:oidc-provider/oidc.eks.us-west-2.amazonaws.com/id/58D314B2…
+#   arn:…:oidc-provider/oidc.eks.us-west-2.amazonaws.com/id/9CE1B4A2…
+#
+# **一个 ap-northeast-2 的都没有。** 韩国集群的 issuer
+# (`oidc.eks.ap-northeast-2.amazonaws.com/id/978D6D13…`)根本没注册。
+#
+# 后果的形状很坏:把清单照抄到韩国,pod **能起来**、能通过健康检查的前半段,
+# 然后每一次 AWS 调用都 403。也就是说这个缺陷在「切换前做静态检查」时完全看不见,
+# 只在真切换时暴露。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 两件从 API 模型查到的事实(不是凭印象)
+#
+# 1. `CreateOpenIDConnectProvider` 的 required 只有 `['Url']`。
+#    **ThumbprintList 不是必填** —— AWS 会自己去取证书指纹。
+#    所以这里刻意不写死指纹:写死的值会随 CA 轮换而过期,
+#    而过期的表现又是 403,和「没注册」长得一样。
+#    (东京那个现有 provider 的指纹是 06b25927c42a721631c1efd9431e648fa62e1e39,
+#     但那是**当时**取到的值,不该复制到这里当常量。)
+#
+# 2. `Url` 在 `createOnlyProperties` 里 —— 改 URL 等于重建资源。
+#    而重建会让所有引用它的信任策略短暂失效,所以 URL 必须一次写对。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 注意:IAM 是全局服务
+#
+# OIDC provider 不属于任何 region(虽然它的 URL 里带着 region)。
+# 这个栈部到 ap-northeast-2 只是为了和其他 DR 栈放在一起,
+# 部到别的 region 效果完全一样。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 这个栈**不改信任策略**
+#
+# 那 7 个角色是别的 CFN 栈(ServicesEks2 / Applications)建的,
+# CloudFormation 改不了自己不拥有的资源。所以信任策略的改动走
+# `scripts/add_korea_irsa_trust.py` —— 幂等、只追加、改前备份。
+# ══════════════════════════════════════════════════════════════════════════════
+
+Parameters:
+  KoreaOidcUrl:
+    Type: String
+    Default: https://oidc.eks.ap-northeast-2.amazonaws.com/id/978D6D13181C50CF75450B933B976ADD
+    Description: >
+      韩国集群的 OIDC issuer。取自
+      `aws eks describe-cluster --name dr-korea-petsite --query cluster.identity.oidc.issuer`。
+      ⚠️ 集群重建会换掉这个 id —— 换了就要更新这个参数（且是 createOnly，会重建资源）。
+
+Resources:
+  KoreaClusterOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    # 保留：信任策略里会硬引用它的 ARN。删掉它会让 7 个角色的韩国那条语句
+    # 指向一个不存在的 principal —— IAM 不会报错，只是永远拒绝。
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: !Ref KoreaOidcUrl
+      # sts.amazonaws.com 是 IRSA 的固定 audience，与东京那个 provider 一致
+      # （get-open-id-connect-provider 查到东京的 ClientIDList 就是这一个值）。
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Purpose
+          Value: petsite-dr-korea-irsa
+
+Outputs:
+  ProviderArn:
+    Description: 信任策略里要用的 Federated principal
+    Value: !Ref KoreaClusterOidcProvider
+
+  OidcHost:
+    Description: 信任策略 Condition 键的前缀（不含 https://）
+    Value: !Select [1, !Split ['https://', !Ref KoreaOidcUrl]]
