@@ -406,7 +406,11 @@ async def promote_database(inp: ActivityInput) -> StepResult:
         f"--global-cluster-identifier {_GLOBAL_CLUSTER} "
         f"--target-db-cluster-identifier {_SECONDARY_CLUSTER_ARN or '<未设>'}"
     )
-    cmd = base if ordered else f"{base} --allow-data-loss"
+    # 与真实调用保持一致:两边都显式带参数。
+    # 早先这里是 `base if ordered else …`(有序分支不带任何标志),
+    # 那会让 dry_run 打印的命令和真执行路径**不是同一条命令** ——
+    # 而 would_run 的全部价值就在于「照着它跑能复现」。
+    cmd = f"{base} --switchover" if ordered else f"{base} --allow-data-loss"
 
     if inp.dry_run:
         detail: dict[str, Any] = {"decision": inp.decision, "ordered": ordered}
@@ -432,14 +436,29 @@ async def promote_database(inp: ActivityInput) -> StepResult:
             inconclusive_reason=reason,
         )
 
-    # ⚠️ 真执行路径。当前 worker 角色没有 rds:FailoverGlobalCluster,
-    #    走到这里会 AccessDenied —— 刻意的,权限按步骤逐个放开。
+    # ⚠️ 真执行路径。
     rds = _boto3().client("rds", region_name=_PRIMARY_REGION)
     kwargs: dict[str, Any] = {
         "GlobalClusterIdentifier": _GLOBAL_CLUSTER,
         "TargetDbClusterIdentifier": _SECONDARY_CLUSTER_ARN,
     }
-    if not ordered:
+    # ## 为什么两个分支都**显式**传参
+    #
+    # API 文档写着「If you don't specify AllowDataLoss, the global database
+    # cluster operation defaults to a switchover」—— 所以省略两个参数也能得到
+    # 有序切换。但这一步的整个设计前提是「有序 vs 丢数据」必须是一个
+    # **明确的裁决**,而依赖一个 API 默认值恰好违背这一点:
+    # 上游若哪天改了默认行为,这里会静默地变成另一种语义。
+    #
+    # AllowDataLoss 与 Switchover 是**互斥**的(API 约束:
+    # "Can't be specified together with the Switchover parameter"),
+    # 所以正好每个分支各传一个。
+    #
+    # 显式传参还有一个好处:CloudTrail 里能直接看出当时是哪种语义,
+    # 而不是「什么都没传,所以大概是 switchover」。
+    if ordered:
+        kwargs["Switchover"] = True
+    else:
         kwargs["AllowDataLoss"] = True
     rds.failover_global_cluster(**kwargs)
     activity.heartbeat("failover_global_cluster 已提交")
