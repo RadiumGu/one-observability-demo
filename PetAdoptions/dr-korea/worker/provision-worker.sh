@@ -62,7 +62,36 @@ fi
 
 mkdir -p "$APP"
 log "同步 worker 代码（S3 是唯一来源）"
+# ⚠️ 记下同步前的代码指纹。
+#
+# 2026-09-25 踩到的坑：这个脚本原来**只在 systemd 单元变化时重启**。
+# 应用代码（activities.py / workflows.py）变了不重启，而
+# **Python 进程还拿着内存里的旧模块** —— 于是:
+#
+#   磁盘上的 md5 与本地一致  ✅   看起来部署成功了
+#   worker 在队列上接单      ✅   核实判据也通过了
+#   实际跑的还是旧代码       ❌
+#
+# 那个核实判据（"worker 已在 dr-plan-queue 上接单"）在两种情况下都通过 ——
+# **又一个「分不出来」的判据**。实测表现：改了 promote_database 的
+# would_run，部署后 md5 对得上、grep 得到新代码，但 workflow 返回的
+# would_run 仍是旧的。
+CODE_FP_BEFORE="$(cat /opt/dr-worker/.code.sha256 2>/dev/null || true)"
+
 aws s3 sync "s3://${CODE_BUCKET}/${CODE_PREFIX}" "$APP/" --region "$REGION" --only-show-errors
+
+# 指纹取所有 .py 的内容哈希（排序后拼接再哈希，与文件顺序无关）。
+# 不用目录 mtime：sync 会重写 mtime 而内容可能没变，那会导致无谓重启。
+CODE_FP_AFTER="$(find "$APP" -maxdepth 1 -name '*.py' -type f -print0 \
+  | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)"
+echo "$CODE_FP_AFTER" > /opt/dr-worker/.code.sha256
+if [ "$CODE_FP_BEFORE" != "$CODE_FP_AFTER" ]; then
+  CODE_CHANGED=1
+  log "应用代码有变（$(echo "$CODE_FP_BEFORE" | cut -c1-8)… → $(echo "$CODE_FP_AFTER" | cut -c1-8)…），稍后重启 worker"
+else
+  CODE_CHANGED=0
+  log "应用代码未变"
+fi
 
 # requirements 变了才重装 —— pip install 不快，而 provisioning 可能被反复跑。
 REQ="$APP/requirements.txt"
@@ -94,15 +123,23 @@ if [ ! -f "$UNIT_SRC" ]; then
   log "错误：$UNIT_SRC 不存在"; exit 1
 fi
 # 只在内容变了才 daemon-reload + restart —— 无谓重启会打断正在跑的切换。
-if ! cmp -s "$UNIT_SRC" "$UNIT_DST"; then
-  log "单元有变，安装并重启"
+#
+# ⚠️ 重启条件是**单元变化 OR 应用代码变化**，两者缺一不可。
+# 只看单元会让新代码永远不生效（Python 拿着内存里的旧模块），
+# 而磁盘 md5 和「队列上有 poller」这两个判据都分辨不出这种情况。
+UNIT_CHANGED=0
+cmp -s "$UNIT_SRC" "$UNIT_DST" || UNIT_CHANGED=1
+if [ "$UNIT_CHANGED" = 1 ]; then
+  log "单元有变，安装"
   install -m 0644 "$UNIT_SRC" "$UNIT_DST"
   systemctl daemon-reload
-  systemctl enable dr-worker
+fi
+systemctl enable dr-worker >/dev/null 2>&1 || true
+if [ "$UNIT_CHANGED" = 1 ] || [ "$CODE_CHANGED" = 1 ]; then
+  log "重启 worker（单元变=$UNIT_CHANGED 代码变=$CODE_CHANGED）"
   systemctl restart dr-worker
 else
-  log "单元未变"
-  systemctl enable dr-worker >/dev/null 2>&1 || true
+  log "单元与代码都未变，不重启"
   systemctl is-active --quiet dr-worker || { log "服务没在跑，拉起"; systemctl start dr-worker; }
 fi
 

@@ -43,6 +43,25 @@ Parameters:
     Default: dr-korea-agentcore-926093770964-ap-northeast-2
     Description: 计划正文所在的桶（与 temporal-mcp 代码包同桶，不同前缀）
 
+  GlobalClusterArn:
+    Type: String
+    Default: arn:aws:rds::926093770964:global-cluster:petsite-global
+    Description: >
+      Aurora 全局数据库的 ARN。⚠️ 注意没有 region 段（两个冒号连着）——
+      全局集群不属于任何 region，这不是笔误。
+
+  PrimaryClusterArn:
+    Type: String
+    Default: arn:aws:rds:ap-northeast-1:926093770964:cluster:serviceseks2-databaseb269d8bb-efjeyzicx2ak
+    Description: >
+      当前主集群（东京）。官方样例策略要求带上它 —— 漏掉会让调用被拒，
+      而报错只说没权限，不会说少了哪个 ARN。
+
+  SecondaryClusterArn:
+    Type: String
+    Default: arn:aws:rds:ap-northeast-2:926093770964:cluster:dr-korea-aurora-secondarycluster-5ctcqnmbkro4
+    Description: 要提升的韩国从集群
+
   NodegroupArn:
     Type: String
     Default: arn:aws:eks:ap-northeast-2:926093770964:nodegroup/dr-korea-petsite/dr-korea-workers/4ad06992-7957-b47d-7adf-72656f7ffdf0
@@ -151,6 +170,36 @@ Resources:
           #
           # 风险边界:它是 List 级、纯读,泄露的是本账号本 region 的 ASG 拓扑,
           # 不含凭据也不能改任何东西。
+          # ── 最后一条写权限:提升韩国从集群 ────────────────────────────
+          #
+          # ⚠️ 这是整套权限里**唯一会动数据库拓扑**的一条。放开它意味着
+          # worker 能把韩国从集群提升为主 —— 那会让东京主库从 writer 变成
+          # reader,是真正的切换动作。
+          #
+          # 所以 workflow 里把它做成**需要 signal 放行的决策点**:
+          # 没有明确裁决(ordered / allow_data_loss)就抛 non_retryable 错误,
+          # 超时也不放行。见 workflows.py 的 database_decision。
+          #
+          # ## Resource 为什么是三个 ARN
+          #
+          # 抄自官方样例(r53recovery/latest/dg/security_iam_region_switch_aurora.html
+          # 的 Aurora Global Database execution block sample policy):
+          # 除了全局集群和目标从集群,**还要带上当前主集群**。
+          # 我原本只想写两个 —— 漏掉主集群会让调用被拒,
+          # 而报错只会说没权限,不会说少了哪个 ARN。
+          #
+          # 另注:全局集群的 ARN **没有 region 段**
+          # (arn:aws:rds::<acct>:global-cluster:<name>,两个冒号连着),
+          # 那不是笔误 —— 全局集群不属于任何 region。
+          - Sid: PromoteSecondaryCluster
+            Effect: Allow
+            Action:
+              - rds:FailoverGlobalCluster
+            Resource:
+              - !Ref GlobalClusterArn
+              - !Ref PrimaryClusterArn
+              - !Ref SecondaryClusterArn
+
           - Sid: ReadAsgLifecycleState
             Effect: Allow
             Action:
