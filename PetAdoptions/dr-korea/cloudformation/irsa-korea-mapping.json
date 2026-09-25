@@ -1,0 +1,38 @@
+{
+  "_comment": [
+    "petsite 的 ServiceAccount → IAM 角色映射。",
+    "",
+    "⚠️ 这不是手写的：每一项都来自 2026-09-25 读东京 PetSite 活集群",
+    "   （namespace petadoptions 下 ServiceAccount 的",
+    "   `eks.amazonaws.com/role-arn` 注解）。",
+    "",
+    "怎么重新生成（SA 或角色变动后必须重来）：",
+    "   读 PetSite 集群 namespace petadoptions 的 ServiceAccount，",
+    "   取每个的 metadata.annotations['eks.amazonaws.com/role-arn']，",
+    "   角色名是 ARN 最后一段。",
+    "",
+    "刻意**没有**收进来的两个：",
+    "   default              没有 role-arn 注解，不走 IRSA",
+    "   fis-service-account  指向 chaos-fis-experiment-role，是混沌实验用的，",
+    "                        不是 petsite 业务链路的一环；切换时不需要它",
+    "",
+    "korea_provider_arn / korea_oidc_host 来自",
+    "   aws eks describe-cluster --region ap-northeast-2 --name dr-korea-petsite",
+    "     --query cluster.identity.oidc.issuer",
+    "   → https://oidc.eks.ap-northeast-2.amazonaws.com/id/978D6D13181C50CF75450B933B976ADD",
+    "   host 是去掉 https:// 的部分（信任策略的 Condition 键用它做前缀）"
+  ],
+
+  "korea_provider_arn": "arn:aws:iam::926093770964:oidc-provider/oidc.eks.ap-northeast-2.amazonaws.com/id/978D6D13181C50CF75450B933B976ADD",
+  "korea_oidc_host": "oidc.eks.ap-northeast-2.amazonaws.com/id/978D6D13181C50CF75450B933B976ADD",
+
+  "service_accounts": {
+    "petsite-sa": "Applications-PetSiteServiceAccount6A1851C9-y5J6EGm1X5bM",
+    "list-adoptions-sa": "ServicesEks2-listadoptionsServiceAccountRole9A4594D-amvOjoW5dHjk",
+    "pay-for-adoption-sa": "ServicesEks2-payforadoptionServiceAccountRole40AF89-oEilVHOTwr8m",
+    "search-service-sa": "ServicesEks2-searchserviceServiceAccountRole588AF64-Sulrl6FvKO5F",
+    "pethistory-sa": "Applications-petadoptionshistoryapplicationPetSiteS-UsHWnPL90sD2",
+    "petfood-sa": "ServicesEks2-petfoodServiceAccountRole25957383-tECVCVv0ZjpT",
+    "traffic-generator-sa": "ServicesEks2-trafficgeneratorServiceAccountRole1029-ZjtBnUIVOBI1"
+  }
+}
