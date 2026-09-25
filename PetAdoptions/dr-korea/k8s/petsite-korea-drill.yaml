@@ -1,0 +1,117 @@
+# petsite-korea-drill.yaml —— 只为一次演练:证明韩国的 kubelet 能从韩国 ECR
+# 把 petsite 镜像拉起来,并且 pod 里的 SDK 能通过 IRSA 拿到凭据。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# ⚠️ 这**不是**一份能让 petsite 真正服务的清单
+#
+# petsite 启动时要从 SSM Parameter Store 读 `/petstore` 前缀的配置。
+# 2026-09-25 实测:东京有 41 个参数,韩国 **0 个**。而且照搬也没用 ——
+# 那些参数的**值**指向东京的资源:
+#
+#   rdsendpoint / rds-reader-endpoint / rdssecretarn   东京 Aurora 与 Secrets
+#   queueurl / snsarn / petadoptionsstepfnarn          东京 SQS / SNS / StepFunctions
+#   dynamodbtablename / s3bucketname                   东京的表和桶
+#   dataprotection/key-*  ×4（SecureString）            ASP.NET Data Protection 密钥
+#   agent/waggleairuntimearn                           东京的 AgentCore runtime
+#
+# 在「东京挂了」的场景下,把这些值复制到韩国等于让韩国去连一堆不存在的后端。
+# 真正的灾备需要韩国侧自己的 DynamoDB / SQS / SNS / StepFunctions / S3 / API GW,
+# 或者用全局版本的服务。**那是一个独立的工作项,不是配置复制。**
+#
+# 所以这次演练的预期结果是 pod 起来后**因读不到配置而失败**。
+# 那个失败形状本身就是产出:它区分了「镜像/调度/IRSA 通了」与「应用能服务」。
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# 与东京生产清单的差异（都是刻意的）
+#
+# 1. 镜像地址换成 **ap-northeast-2**（tag 是内容哈希，与东京同一个镜像，
+#    digest 已逐个比对一致）
+# 2. replicas 1 而不是 2 —— 演练只需要一个 pod 就能证明拉取与调度
+# 3. 去掉 `aws.cdk.eks/prune-*` 标签 —— 那是东京 CDK 的清理标记，
+#    带过来会让东京那个栈的下一次 prune 把它当成孤儿
+# 4. 去掉 topologySpreadConstraints —— 只有一个节点，约束没有意义
+# 5. startupProbe 的 failureThreshold 从 60 降到 6（5s × 6 = 30s）——
+#    原值意味着一个读不到配置的 pod 要 5 分钟才被判失败，
+#    而我们要的就是尽快看到失败形状
+# ══════════════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: petsite-deployment
+  namespace: petadoptions
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: petsite
+  template:
+    metadata:
+      labels:
+        app: petsite
+    spec:
+      # 这个 SA 是 IRSA 验证时建的，已经带着
+      # eks.amazonaws.com/role-arn 注解指向 Applications-PetSiteServiceAccount…
+      serviceAccountName: petsite-sa
+      containers:
+        - name: petsite
+          # ⚠️ ap-northeast-2 —— 这正是这次演练要验的东西
+          image: 926093770964.dkr.ecr.ap-northeast-2.amazonaws.com/cdk-hnb659fds-container-assets-926093770964-ap-northeast-1:e849677d52a8bdfdcf34a388637c4205026abec9698a3977eda42fd89c830acc
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AWS_XRAY_DAEMON_ADDRESS
+              value: xray-service.default:2000
+            - name: ASPNETCORE_URLS
+              value: http://+:8080
+            - name: PARAMETER_STORE_PREFIX
+              value: /petstore
+            - name: SEARCH_API_URL_PARAM_NAME
+              value: searchapiurl
+            - name: PET_LIST_ADOPTIONS_URL_PARAM_NAME
+              value: petlistadoptionsurl
+            - name: PAYMENT_API_URL_PARAM_NAME
+              value: paymentapiurl
+            - name: PET_HISTORY_URL_PARAM_NAME
+              value: pethistoryurl
+            - name: CLEANUP_ADOPTIONS_URL_PARAM_NAME
+              value: cleanupadoptionsurl
+            - name: RUM_SCRIPT_PARAMETER_NAME
+              value: rumscript
+            - name: WAGGLE_AI_RUNTIME_ARN_PARAM_NAME
+              value: /petstore/agent/waggleairuntimearn
+            - name: FOOD_API_URL_PARAM_NAME
+              value: petfoodapiurl
+            - name: CART_API_URL_PARAM_NAME
+              value: petfoodcarturl
+          resources:
+            limits:
+              cpu: 512m
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/status
+              port: 8080
+            # 6 而不是生产的 60：要尽快看到失败形状
+            failureThreshold: 6
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health/status
+              port: 8080
+            failureThreshold: 2
+            periodSeconds: 5
+            successThreshold: 1
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health/status
+              port: 8080
+            failureThreshold: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
