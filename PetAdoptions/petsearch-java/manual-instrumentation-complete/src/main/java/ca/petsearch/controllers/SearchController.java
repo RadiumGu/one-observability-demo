@@ -179,7 +179,58 @@ public class SearchController {
         }
     }
 
+    /** DynamoDB 条目里必须齐备的属性 —— 缺任一个这条记录就无法构成一只可展示的宠物。 */
+    private static final List<String> REQUIRED_PET_ATTRIBUTES = List.of(
+            "petid", "availability", "cuteness_rate", "petcolor", "pettype", "price", "image");
+
+    /**
+     * 把 DynamoDB 条目映射成 Pet；**条目残缺时返回 null，由调用方过滤掉**。
+     *
+     * ## 为什么要容错（2026-09-26 的整站故障）
+     *
+     * 原实现对七个属性全部无条件解引用：
+     *
+     * <pre>
+     *   String cutenessRate = item.get("cuteness_rate").getS();   // item.get() 为 null -&gt; NPE
+     *   String price        = item.get("price").getS();
+     *   String petUrl       = getPetUrl(petType, item.get("image").getS());
+     * </pre>
+     *
+     * 于是**任何一条缺字段的记录都会让整个 /api/search 返回 500** ——
+     * 异常穿出 stream、穿出 try，被 `throw e` 重新抛出，26 条正常记录一起丢掉，
+     * petsite 首页变成空白错误页。
+     *
+     * 实测触发过一次：有人经 petstatusupdater（**该接口无认证**）往目录表写了一条
+     * 只有 petid / pettype / availability 三个字段的探针记录，
+     * 首页随即不可用 20 分钟。**一条脏数据打挂整站**，而写入门槛是一次匿名 HTTP 请求。
+     *
+     * ## 为什么是跳过而不是补默认值
+     *
+     * 缺 price / image 的记录不是「显示不全的宠物」，而是**不该存在的记录** ——
+     * 补默认值会把脏数据渲染成一只价格为 0、没有图片的宠物，
+     * 让上游的数据问题永久隐身。跳过 + 计数 + 告警才能让它被修掉。
+     *
+     * ## 跳过必须可观测
+     *
+     * 静默跳过只是把「整站 500」换成「目录莫名少几只」，后者更难查。
+     * 所以这里 WARN 日志带上主键与缺失字段名，并由调用方发
+     * `petsSkippedMalformed` 计数器 —— 该指标 &gt; 0 即可直接告警。
+     */
     private Pet mapToPet(Map<String, AttributeValue> item) {
+        List<String> missing = REQUIRED_PET_ATTRIBUTES.stream()
+                .filter(attr -> item.get(attr) == null || item.get(attr).getS() == null)
+                .collect(Collectors.toList());
+
+        if (!missing.isEmpty()) {
+            // 主键单独取，因为它本身也可能缺 —— 日志里必须能定位到是哪条记录。
+            String keyPetType = item.get("pettype") != null ? item.get("pettype").getS() : "<missing>";
+            String keyPetId = item.get("petid") != null ? item.get("petid").getS() : "<missing>";
+            logger.warn("Skipping malformed DynamoDB item: pettype={} petid={} missingAttributes={}",
+                    keyPetType, keyPetId, missing);
+            Span.current().setAttribute("search.skipped_malformed_petid", keyPetId);
+            return null;
+        }
+
         String petId = item.get("petid").getS();
         String availability = item.get("availability").getS();
         String cutenessRate = item.get("cuteness_rate").getS();
@@ -244,10 +295,23 @@ public class SearchController {
             span.setAttribute("search.userid", userId);
             span.setAttribute("search.userid_alias", userIdAlias);
 
-            List<Pet> result = ddbClient.scan(
+            List<Map<String, AttributeValue>> items = ddbClient.scan(
                     buildScanRequest(validatedPetType, normalizedPetColor, normalizedPetId))
-                    .getItems().stream().map(this::mapToPet)
+                    .getItems();
+
+            // mapToPet 对残缺条目返回 null —— 在这里滤掉，**一条脏记录不该让整次查询失败**。
+            List<Pet> result = items.stream()
+                    .map(this::mapToPet)
+                    .filter(Objects::nonNull)
                     .collect(Collectors.toList());
+
+            int skipped = items.size() - result.size();
+            if (skipped > 0) {
+                // 既打 span 属性也发指标：span 用于单次排查，指标用于告警。
+                span.setAttribute("search.skipped_malformed_count", skipped);
+                metricEmitter.emitPetsSkippedMalformedMetric(skipped);
+            }
+
             metricEmitter.emitPetsReturnedMetric(result.size());
             return result;
 
