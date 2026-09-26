@@ -23,10 +23,12 @@ public class MetricEmitter {
     static String API_COUNTER_METRIC = "apiBytesSent";
     static String API_LATENCY_METRIC = "latency";
     static String PETS_RETURNED_METRIC = "petsReturned";
+    static String PETS_SKIPPED_METRIC = "petsSkippedMalformed";
 
     private LongCounter apiBytesSentCounter;
     private LongHistogram apiLatencyHistogram;
     private LongCounter petsReturned;
+    private LongCounter petsSkippedMalformed;
 
     public MetricEmitter(OpenTelemetry otel) {
         Meter meter = otel.meterBuilder("aws-otel").setInstrumentationVersion("1.0").build();
@@ -36,12 +38,14 @@ public class MetricEmitter {
         String latencyMetricName = API_LATENCY_METRIC;
         String apiBytesSentMetricName = API_COUNTER_METRIC;
         String petsReturnedMetricName = PETS_RETURNED_METRIC;
+        String petsSkippedMetricName = PETS_SKIPPED_METRIC;
 
         String instanceId = System.getenv("INSTANCE_ID");
         if (instanceId != null && !instanceId.trim().equals("")) {
             latencyMetricName = API_LATENCY_METRIC + "_" + instanceId;
             apiBytesSentMetricName = API_COUNTER_METRIC + "_" + instanceId;
             petsReturnedMetricName = PETS_RETURNED_METRIC + "_" + instanceId;
+            petsSkippedMetricName = PETS_SKIPPED_METRIC + "_" + instanceId;
         }
 
         apiBytesSentCounter =
@@ -55,6 +59,18 @@ public class MetricEmitter {
                 meter
                         .counterBuilder(petsReturnedMetricName)
                         .setDescription("Number of pets returned by this service")
+                        .setUnit("one")
+                        .build();
+
+        // 被跳过的残缺记录数。**跳过必须可观测** —— 静默丢记录只是把
+        // 「整站 500」换成了「目录少几只而无人知道」，那是更难查的缺陷。
+        // 该指标 > 0 即可直接告警：2026-09-26 那次故障期间，Pod 状态、
+        // ALB 目标健康、ALB 5XX 全部是绿的，只有业务探针发现了它 ——
+        // 这个计数器是第一个能在指标层面暴露此类故障的信号。
+        petsSkippedMalformed =
+                meter
+                        .counterBuilder(petsSkippedMetricName)
+                        .setDescription("DynamoDB items skipped because required attributes were missing")
                         .setUnit("one")
                         .build();
 
@@ -96,6 +112,10 @@ public class MetricEmitter {
 
     public void emitPetsReturnedMetric(int petsCount) {
         petsReturned.add(petsCount);
+    }
+
+    public void emitPetsSkippedMalformedMetric(int skippedCount) {
+        petsSkippedMalformed.add(skippedCount);
     }
 
 }
