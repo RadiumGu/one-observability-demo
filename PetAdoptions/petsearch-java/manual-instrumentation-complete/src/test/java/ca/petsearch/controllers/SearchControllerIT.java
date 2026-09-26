@@ -7,6 +7,7 @@ package ca.petsearch.controllers;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDB;
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClientBuilder;
 import com.amazonaws.services.dynamodbv2.model.AttributeValue;
+import com.amazonaws.services.dynamodbv2.model.DeleteItemRequest;
 import com.amazonaws.services.dynamodbv2.model.PutItemRequest;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
@@ -132,6 +133,57 @@ public class SearchControllerIT {
                 .contains("petid", "availability", "petcolor", "peturl", kittenId, bunnyId, puppyId)
                 .doesNotContain("{S:")
         ;
+    }
+
+    /**
+     * 一条残缺记录不得让整次查询失败 —— 它必须被跳过，其余宠物照常返回。
+     *
+     * ## 为什么有这条测试
+     *
+     * 2026-09-26 生产事故：有人经 petstatusupdater（该接口**无认证**）往宠物目录表
+     * 写了一条只有 petid / pettype / availability 三个字段的探针记录。
+     * 当时的 `mapToPet` 对七个属性全部无条件 `.getS()`，于是抛 NullPointerException，
+     * 异常穿出 stream 被重新抛出，**整个 /api/search 返回 500**，
+     * 26 条正常记录一起丢掉，petsite 首页变成空白错误页，持续 20 分钟。
+     *
+     * 当时所有常规信号都是绿的：Pod `2/2 Running`、ALB 目标组 `healthy`、
+     * ALB 5xx 无数据（petsite 把后端错误包成 HTTP 200 错误页）。
+     * 只有业务探针发现了它 —— 所以这条断言要钉住的是
+     * **「坏数据的影响范围必须限制在它自己这一条上」**。
+     */
+    @Test
+    public void testMalformedItemIsSkippedAndDoesNotFailTheSearch() {
+        // 只带主键与 availability，缺 cuteness_rate / petcolor / price / image ——
+        // 复刻那条探针记录的形状。注意不能走 putPet()：它会补上 petid 与 image。
+        final String malformedId = "MALFORMED-" + UUID.randomUUID();
+        dynamoDbClient.putItem(new PutItemRequest()
+                .withTableName(DYNAMODB_TABLE)
+                .withItem(new HashMap<>(Map.of(
+                        "pettype", new AttributeValue().withS("puppy"),
+                        "petid", new AttributeValue().withS(malformedId),
+                        "availability", new AttributeValue().withS("no")
+                ))));
+
+        try {
+            String body = this.restTemplate.getForObject(
+                    "http://localhost:" + port + "/api/search", String.class);
+
+            // 1) 整次查询必须成功，且三只正常宠物一只都不能少。
+            //    修复前这里拿到的是 500 错误体，三个 id 全都不在。
+            assertThat(body)
+                    .contains("petid", "availability", "petcolor", "peturl",
+                            kittenId, bunnyId, puppyId);
+
+            // 2) 残缺记录本身必须被跳过 —— 不是补默认值渲染成一只 0 元无图的宠物。
+            assertThat(body).doesNotContain(malformedId);
+        } finally {
+            dynamoDbClient.deleteItem(new DeleteItemRequest()
+                    .withTableName(DYNAMODB_TABLE)
+                    .withKey(Map.of(
+                            "pettype", new AttributeValue().withS("puppy"),
+                            "petid", new AttributeValue().withS(malformedId)
+                    )));
+        }
     }
 
     @Test
