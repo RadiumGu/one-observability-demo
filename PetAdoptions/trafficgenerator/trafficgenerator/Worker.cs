@@ -136,10 +136,32 @@ namespace trafficgenerator
                         Encoding.Default, "application/x-www-form-urlencoded"));
 
              // Completes adoption by making the payment
+                //
+                // ⚠️ userId 是**必填**的，不能省。
+                //
+                //    payforadoption 的 decodeCompleteAdoptionRequest 三个查询参数
+                //    缺一即返回 400（petId / petType / userID）。而 petsite 的
+                //    MakePayment 从**表单体**做模型绑定取 userId —— 所以这里不带，
+                //    整条领养链路就到不了支付后端。
+                //
+                //    实测（2026-09-26，修复 ca60bc8f 上线后）：
+                //      不带 userId → 页面 "Sorry, something went wrong"
+                //      带   userId → 页面 "Adoption Complete"，transactions 落行
+                //
+                //    在 ca60bc8f 之前，不带 userId 的表现是**假成功**：
+                //    页面显示「Adoption Complete」而后端一行没写，HTTP 200 零异常。
+                //    那次东京线上的实测比例是 3574 次尝试对 104 次真正落库（2.9%），
+                //    也就是说这个 demo 展示的领养链路追踪，97% 是假的 ——
+                //    没有 payforadoption 段、没有 Aurora 段、没有 SQS 段。
+                //
+                //    用固定的 "traffic-generator" 而不是随机值：
+                //    它要能在追踪与日志里和合成金丝雀（synthetic-adoption）
+                //    以及真实用户区分开，否则排查时分不清流量来源。
                 await _httpClient.PostAsync($"{_petSiteUrl}/Payment/MakePayment",
                     new StringContent(
                         $"pettype={currentPet.pettype}&" +
-                        $"petid={currentPet.petid}",
+                        $"petid={currentPet.petid}&" +
+                        $"userId=traffic-generator",
                         Encoding.Default, "application/x-www-form-urlencoded"));
 
                 // Lists all adopted pets
