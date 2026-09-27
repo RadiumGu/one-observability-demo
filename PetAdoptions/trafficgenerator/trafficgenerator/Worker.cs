@@ -23,6 +23,9 @@ namespace trafficgenerator
         private string _petSiteUrl;
         private string _petSearchUrl;
         private string _trafficdelaytime;
+        // 每轮领养上限。见 ThrowSomeTrafficIn 里那段说明 ——
+        // 它防的是「领养链路修好之后目录被领养光、ValidatePet 开始拒绝」这个自限循环。
+        private string _maxAdoptionsPerCycle;
 
         public Worker(ILogger<Worker> logger, IConfiguration configuration)
         {
@@ -50,6 +53,7 @@ namespace trafficgenerator
             _petSiteUrl = configuration["petsiteurl"];
             _petSearchUrl = configuration["searchapiurl"];
             _trafficdelaytime = configuration["trafficdelaytime"];
+            _maxAdoptionsPerCycle = configuration["maxadoptionspercycle"];
             
         }
 
@@ -102,11 +106,19 @@ namespace trafficgenerator
 
             _logger.LogInformation($"Total number of pets - {_allPets.Count}");
             Random random = new Random();
-            var loadSize = random.Next(5, _allPets.Count);
+
+            // ⚠️ random.Next(5, n) 在 n <= 5 时抛 ArgumentOutOfRangeException。
+            //    目前不会触发（/api/search 返回全部 26 只，不分可用性），
+            //    但一旦 search 改成只返回可领养的，这里会在某个半夜炸掉。
+            var picked = random.Next(5, Math.Max(6, _allPets.Count));
 
          //   Console.WriteLine($"PetSite URL: {_petSiteUrl}");
 
-            if (loadSize > 20)
+            // ⚠️ 这个分支必须用**未截断的** picked，不是下面那个 loadSize。
+            //    它决定的是「要不要清理领养历史」，与每轮领养多少只是两件事。
+            //    改用截断后的值会让上限小于 20 时这条路径**永远不走** ——
+            //    那是一个没人会注意到的行为改变（历史从此不再被清理）。
+            if (picked > 20)
             {
                 await _httpClient.DeleteAsync($"{_petSiteUrl}/pethistory/deletepetadoptionshistory");
                 _logger.LogInformation("Deleted PetAdoptions History");
@@ -117,6 +129,38 @@ namespace trafficgenerator
             }
 
             
+            // ── 每轮领养上限 ──────────────────────────────────────────────
+            // 为什么需要它（2026-09-27 实测的一个自限循环）：
+            //
+            //   ① 补货（housekeeping）只在每轮开头做一次
+            //   ② 随后一轮领养 5..25 只（26 只目录里几乎全部）
+            //   ③ payforadoption 的 ValidatePet 会去问 search-service
+            //      这只宠物是否可领养，非 200 就在 CreateTransaction **之前**返回
+            //   ④ 而 traffic-generator 从 /api/search 取到的是**全部 26 只**
+            //      （不分可用性），所以目录被领养光之后，随机挑选有约 96%
+            //      会被 ValidatePet 拒掉
+            //
+            // 结果是一个**自限循环**：领养链路修好 → 目录被领养光 → 校验开始拒绝
+            // → 领养全停。实测形态：90 分钟里 completeadoption 5493 次，而
+            // transaction_created_successfully **0 次**，且 create_transaction_failed
+            // 也是 0 次（因为根本没走到那一步）。
+            //
+            // ⚠️ 这个故障全程 HTTP 200、零异常、页面正常渲染 —— 和 2026-09-26
+            //    那次「假成功」是同一个观测盲区。它是被新建的业务结果比率告警
+            //    在第一次运行时抓到的，不是被人看出来的。
+            //
+            // 默认 8 而不是"保留原行为"：原行为已被证明会让领养停摆，
+            // 保留它不是稳妥而是继续坏着。要恢复旧行为，把这个变量设成一个
+            // 大于宠物总数的值即可。
+            var maxPerCycle = 8;
+            if (Int32.TryParse(_maxAdoptionsPerCycle, out int configured) && configured > 0)
+            {
+                maxPerCycle = configured;
+            }
+            var loadSize = Math.Min(picked, maxPerCycle);
+            _logger.LogInformation(
+                $"Adoption load size: {loadSize} (picked {picked}, cap {maxPerCycle})");
+
             for (int i = 0; i < loadSize; i++)
             {
                 var currentPet = _allPets[random.Next(0, _allPets.Count - 1)];
