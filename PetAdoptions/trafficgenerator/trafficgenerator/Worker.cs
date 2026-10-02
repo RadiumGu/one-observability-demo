@@ -97,8 +97,39 @@ namespace trafficgenerator
         {
             _logger.LogInformation("Synchronous Housekeeping call");
             // Performs housekeeping. Basically, reset the application data and gets ready for the execution cycle
-            _httpClient.GetAsync(
-                $"{_petSiteUrl}/housekeeping/").Wait();
+            //
+            // ⚠️ `userId` 是**必需的查询参数**，不是可选的。
+            //
+            //    petsite 的 HouseKeeping action 在没有 userId 时**不执行重置**，
+            //    而是 302 到 /Home/Index。实测（2026-10-02）：
+            //
+            //      GET /housekeeping/                  → 302, Location: /Home/Index
+            //      GET /housekeeping/?userId=sre-probe → 200, "House Keeping" 页面
+            //                                            且 DropTransactionsByPets
+            //                                            rowsAffected=25（真的复原了）
+            //
+            //    而 HttpClient **默认跟随重定向**，所以不带 userId 时这里会拿到
+            //    /Home/Index 的 200 —— 调用方看到的是"成功"，而补货一次都没发生。
+            //    这个缺陷让目录长期见底：领养按生成器频率发生，而补货只靠那个
+            //    带 userId 的合成金丝雀，频率低得多。
+            //    后果是 ValidatePet 拒掉约 96% 的领养，比率长期接近 0。
+            //
+            //    用固定的 "traffic-generator" 与 MakePayment 保持一致，
+            //    这样日志与追踪里能认出流量来源。userId 在 CleanupAdoptions 里
+            //    只用于日志与 URL 构造（ResetPetsAvailability 是全局的，不按用户过滤）。
+            var housekeepingResponse = _httpClient.GetAsync(
+                $"{_petSiteUrl}/housekeeping/?userId=traffic-generator").Result;
+
+            // ⚠️ 必须检查状态码。上面那个缺陷之所以能存在这么久，正是因为
+            //    原代码只 .Wait() 而从不看结果 —— 302 跟随之后变成 200，
+            //    与真正成功**无法区分**。这里显式校验，让下一次断掉是响亮的。
+            if (!housekeepingResponse.IsSuccessStatusCode)
+            {
+                _logger.LogError(
+                    $"Housekeeping failed: {(int)housekeepingResponse.StatusCode} " +
+                    $"{housekeepingResponse.StatusCode} — 目录不会被补货，" +
+                    "后续领养会被 ValidatePet 拒绝");
+            }
             
             _logger.LogInformation("Starting Async LoadPetData");
 
