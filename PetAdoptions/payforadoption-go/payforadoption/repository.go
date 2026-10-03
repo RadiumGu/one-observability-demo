@@ -32,6 +32,16 @@ import (
 type PetIdentifier struct {
 	PetID   string
 	PetType string
+	// TxnIDs 是本次重置**实际观察到**的那些交易行的主键。
+	//
+	// 为什么需要它：原来 DropTransactionsByPets 按 (pet_id, pet_type) 删，
+	// 会把「读列表之后才产生」的新交易行一起删掉，于是宠物变成
+	// availability='no' 且无交易行 —— 而重置的列表来自 transactions，
+	// 所以那只宠物**永远回不来**。2026-10-03 实测 20 小时内 26 只里
+	// 有 17 只就是这样消失的，领养成功率从 80% 单调掉到 33%。
+	//
+	// 只删观察到的行，第 3 步新产生的那条就会留下，下一轮重置能看到它。
+	TxnIDs []int64
 }
 
 // Repository as an interface to define data store interactions
@@ -201,22 +211,46 @@ func (r *repo) DropTransactionsByPets(ctx context.Context, pets []PetIdentifier)
 		return nil
 	}
 
-	// Build the WHERE clause with pet_id and pet_type pairs
-	// DELETE FROM transactions WHERE (pet_id = $1 AND pet_type = $2) OR (pet_id = $3 AND pet_type = $4) ...
+	// 按**本轮实际观察到的行主键**删，而不是按 (pet_id, pet_type) 删。
+	//
+	// 原来的写法是 DELETE ... WHERE (pet_id=$1 AND pet_type=$2) OR ...
+	// 它有一个 TOCTOU 竞态：
+	//   1. 重置读到列表 [X]
+	//   2. 把 X 复原成 yes
+	//   3. ★ 生成器又领养了 X → X 变 no，产生一条**新**交易行
+	//   4. 按 pet_id 删 → 把第 3 步那条新行也删了
+	//   5. X 是 no 且无交易行 → 而重置列表来自 transactions → **永远回不来**
+	//
+	// 2026-10-03 实测：3 个生成器每 20 秒领养、cleanup 每约 16 秒一次，
+	// 这个竞态持续命中，20 小时内 26 只宠物有 17 只被孤立，
+	// 领养成功率从 80% 单调掉到 33%。
+	//
+	// 只删观察到的行，第 3 步那条就会留下，下一轮重置能看到它。
+	var ids []int64
+	for _, pet := range pets {
+		ids = append(ids, pet.TxnIDs...)
+	}
+
+	if len(ids) == 0 {
+		// 刻意不退回「按宠物删」—— 那正是上面那个竞态的来源。
+		// 没有主键就什么都不删，让下一轮重置重新读到这些行。
+		WarnWithTrace(ctx, logger, "warning", "no_txn_ids_to_delete",
+			"message", "pets carried no observed transaction ids; deleting nothing on purpose",
+			"petCount", len(pets))
+		return nil
+	}
+
 	var conditions []string
 	var args []interface{}
-	argIndex := 1
-
-	for _, pet := range pets {
-		conditions = append(conditions, fmt.Sprintf("(pet_id = $%d AND pet_type = $%d)", argIndex, argIndex+1))
-		args = append(args, pet.PetID, pet.PetType)
-		argIndex += 2
+	for i, id := range ids {
+		conditions = append(conditions, fmt.Sprintf("$%d", i+1))
+		args = append(args, id)
 	}
 
 	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query
 	// Safe: SQL string is built from parameterized placeholders ($1, $2, etc.), not user input
 	// All actual values are passed via args slice using parameterized queries
-	sql := fmt.Sprintf("DELETE FROM transactions WHERE %s", strings.Join(conditions, " OR "))
+	sql := fmt.Sprintf("DELETE FROM transactions WHERE id IN (%s)", strings.Join(conditions, ", "))
 
 	result, err := r.db.ExecContext(ctx, sql, args...)
 	if err != nil {
@@ -229,6 +263,7 @@ func (r *repo) DropTransactionsByPets(ctx context.Context, pets []PetIdentifier)
 	InfoWithTrace(ctx, logger,
 		"action", "pet_transactions_deleted",
 		"petCount", len(pets),
+		"txnCount", len(ids),
 		"rowsAffected", rowsAffected,
 	)
 
@@ -394,31 +429,48 @@ func (r *repo) ResetPetsAvailability(ctx context.Context) ([]PetIdentifier, erro
 	span := trace.SpanFromContext(ctx)
 	span.AddEvent("resetting pet availability for all adopted pets")
 
-	// Query distinct pet_id and pet_type from transactions
-	sql := "SELECT DISTINCT pet_id, pet_type FROM transactions"
+	// 连同主键 id 一起读 —— **不要用 DISTINCT**。
+	//
+	// 我们必须知道「这一轮看到的到底是哪几行」，否则第 4 步按 (pet_id,
+	// pet_type) 删，会连带删掉读列表之后新产生的交易行，让那只宠物变成
+	// availability='no' 且无交易行，从而永远回不到流通里（这个列表就来自
+	// transactions）。按 id 删是这个竞态唯一的闭合办法。
+	sql := "SELECT id, pet_id, pet_type FROM transactions"
 	rows, err := r.db.QueryContext(ctx, sql)
 	if err != nil {
 		span.RecordError(err)
-		ErrorWithTrace(ctx, logger, "error", "failed to query distinct pets", "err", err)
-		return nil, NewInternalError("failed to query distinct pets from database", err)
+		ErrorWithTrace(ctx, logger, "error", "failed to query pet transactions", "err", err)
+		return nil, NewInternalError("failed to query pet transactions from database", err)
 	}
 	defer rows.Close()
 
-	// Collect all unique pets
+	// 按 (pet_id, pet_type) 聚合，保留每只宠物本轮观察到的全部行主键。
 	type petInfo struct {
 		petID   string
 		petType string
+		txnIDs  []int64
 	}
 	var pets []petInfo
+	idx := make(map[string]int, 32)
 
 	for rows.Next() {
-		var p petInfo
-		if err := rows.Scan(&p.petID, &p.petType); err != nil {
+		var (
+			id      int64
+			petID   string
+			petType string
+		)
+		if err := rows.Scan(&id, &petID, &petType); err != nil {
 			span.RecordError(err)
 			ErrorWithTrace(ctx, logger, "error", "failed to scan pet row", "err", err)
 			return nil, NewInternalError("failed to scan pet data", err)
 		}
-		pets = append(pets, p)
+		key := petID + "\x00" + petType
+		if i, ok := idx[key]; ok {
+			pets[i].txnIDs = append(pets[i].txnIDs, id)
+			continue
+		}
+		idx[key] = len(pets)
+		pets = append(pets, petInfo{petID: petID, petType: petType, txnIDs: []int64{id}})
 	}
 
 	if err := rows.Err(); err != nil {
@@ -449,7 +501,7 @@ func (r *repo) ResetPetsAvailability(ctx context.Context) ([]PetIdentifier, erro
 				errorChan <- err
 			} else {
 				InfoWithTrace(ctx, logger, "action", "pet_availability_reset", "petID", p.petID, "petType", p.petType)
-				successChan <- PetIdentifier{PetID: p.petID, PetType: p.petType}
+				successChan <- PetIdentifier{PetID: p.petID, PetType: p.petType, TxnIDs: p.txnIDs}
 			}
 		}(pet)
 	}
