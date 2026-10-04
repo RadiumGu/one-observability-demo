@@ -464,7 +464,7 @@ func (r *repo) ResetPetsAvailability(ctx context.Context) ([]PetIdentifier, erro
 			ErrorWithTrace(ctx, logger, "error", "failed to scan pet row", "err", err)
 			return nil, NewInternalError("failed to scan pet data", err)
 		}
-		key := petID + "\x00" + petType
+		key := petKey(petID, petType)
 		if i, ok := idx[key]; ok {
 			pets[i].txnIDs = append(pets[i].txnIDs, id)
 			continue
@@ -480,6 +480,42 @@ func (r *repo) ResetPetsAvailability(ctx context.Context) ([]PetIdentifier, erro
 	}
 
 	InfoWithTrace(ctx, logger, "action", "pets_to_reset", "count", len(pets))
+
+	// ── 自愈：把 DynamoDB 里 availability='no' 却**没有交易行**的宠物也补进来 ──
+	//
+	// 为什么单靠 transactions 不够（2026-10-04 实测）：
+	//
+	// CompleteAdoption 的顺序是 CreateTransaction（service.go:99）→
+	// UpdateAvailability（service.go:106）。cleanup 每约 8 秒跑一次，比领养
+	// 还频繁，所以它会落在这两行**之间**：
+	//
+	//   1. 领养：CreateTransaction(X) → 交易行存在，X 仍是 'yes'
+	//   2. cleanup：**合法地**读到这行 → 重置 X（本就是 yes，空操作）→ 删掉这行
+	//   3. 领养：UpdateAvailability → X 变 'no'
+	//   4. X 是 'no' 且无交易行 → 而重置列表来自 transactions → 永远回不来
+	//
+	// ⚠️ 这跟 a01fa93d 修的不是同一个竞态。那次是「删掉了读列表之后新产生的
+	//    行」，按行主键删即可闭合；这次那行**是被正当观察到的**，按主键删
+	//    一样会删它。实测 22 小时内成功率又从 94.4% 单调掉到 38.1%，
+	//    26 只里 15 只被孤立。
+	//
+	// 所以不再逐个去堵窗口 —— 改成让重置**自愈**：凡 availability='no' 的
+	// 宠物都进重置列表，不管它有没有交易行。这样任何孤立路径（包括将来
+	// 新引入的）都能在一个 cleanup 周期内自我纠正。
+	//
+	// 这些宠物的 TxnIDs 为空，所以删除那一步不会为它们删任何行 —— 它们本来
+	// 就没有行。扫描失败**刻意不中断重置**，只降级为「仅 transactions」
+	// 并响亮地记错误：这个补全是安全网，不该让安全网失效连坐主路径。
+	if orphans, err := r.unavailablePetsWithoutTxn(ctx, idx); err != nil {
+		ErrorWithTrace(ctx, logger, "error", "orphan_scan_failed",
+			"message", "降级为仅用 transactions —— 被孤立的宠物本轮不会被复原", "err", err)
+	} else if len(orphans) > 0 {
+		for _, o := range orphans {
+			pets = append(pets, petInfo{petID: o.PetID, petType: o.PetType})
+		}
+		InfoWithTrace(ctx, logger, "action", "orphans_recovered",
+			"count", len(orphans), "totalToReset", len(pets))
+	}
 
 	// Use goroutines to reset availability for each pet concurrently
 	var wg sync.WaitGroup
@@ -546,6 +582,68 @@ type Pet struct {
 	PetType      string `dynamo:"pettype"`
 	Image        string `dynamo:"image"`
 	Price        string `dynamo:"price"`
+}
+
+// petKey 是 (petID, petType) 的唯一键。
+//
+// ⚠️ 只能有这一个地方拼这个键。我第一版在调用方用 petID+petType、
+//    在扫描里用 petType+petID，顺序不一致 —— 去重会**静默失效**
+//    （没有报错，只是每轮把已在列表里的宠物再加一次）。
+func petKey(petID, petType string) string { return petID + "\x00" + petType }
+
+// unavailablePetsWithoutTxn 返回 DynamoDB 里 availability='no'、而**不在**
+// seen 里的宠物 —— 也就是「被孤立」的那些。
+//
+// 它是 ResetPetsAvailability 的安全网。单靠 `transactions` 推导重置列表有一个
+// 无法靠「删得更精确」闭合的竞态（见 ResetPetsAvailability 里的说明）：
+// 交易行可能在宠物被置为 'no' **之前**就被一次正当的 cleanup 删掉了，
+// 此后那只宠物在 transactions 里不留任何痕迹。
+//
+// ⚠️ 判据刻意是「availability='no'」而不是「有没有交易行」——
+//    后者正是那个有缺陷的推导方式。可用性是宠物是否在流通的**权威事实**，
+//    交易行只是它的一个副产品。
+// seen 直接用调用方已有的那张「键 → pets 下标」映射，**不另建一份** ——
+// 两份映射就有两处可能把键拼错。
+func (r *repo) unavailablePetsWithoutTxn(ctx context.Context, seen map[string]int) ([]PetIdentifier, error) {
+	ctx, span := r.cfg.Tracer.Start(ctx, "DDB scan unavailable pets")
+	defer span.End()
+
+	if r.cfg.DynamoDBTable == "" {
+		return nil, errors.New("DynamoDBTable 未配置")
+	}
+
+	// 与 TriggerSeeding 一致地处理接口端点 —— 集群里走 VPC 端点，
+	// 抄错这段会让扫描在有端点的环境里走公网而超时。
+	var awsCfg aws.Config
+	if r.cfg.DDBInterfaceEndpoint != "" {
+		awsCfg = r.cfg.AWSCfg.Copy()
+		awsCfg.BaseEndpoint = aws.String(r.cfg.DDBInterfaceEndpoint)
+	} else {
+		awsCfg = r.cfg.AWSCfg
+	}
+
+	var found []Pet
+	err := dynamo.New(awsCfg).Table(r.cfg.DynamoDBTable).
+		Scan().
+		Filter("$ = ?", "availability", "no").
+		Project("petid", "pettype").
+		All(ctx, &found)
+	if err != nil {
+		span.RecordError(err)
+		return nil, err
+	}
+
+	var out []PetIdentifier
+	for _, p := range found {
+		if p.PetID == "" || p.PetType == "" {
+			continue
+		}
+		if _, ok := seen[petKey(p.PetID, p.PetType)]; ok {
+			continue
+		}
+		out = append(out, PetIdentifier{PetID: p.PetID, PetType: p.PetType})
+	}
+	return out, nil
 }
 
 func (r *repo) TriggerSeeding(ctx context.Context) error {
